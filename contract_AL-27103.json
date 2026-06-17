@@ -1,0 +1,228 @@
+{
+  "source_spec": "Feature_Spec_AL-27103.md",
+  "generated": "2026-06-08",
+  "ticket": "AL-27103",
+  "title": "CGM Food Glucose Prediction",
+  "taskType": "new-domain-capability",
+  "scale": "large",
+  "scaleReason": "Spans api + domain + data + infra: a new carb-based predicted label on meal logging, a new CGM-delta impact card, a 30-min grouping engine with 2-hour lifecycles, and CGM-graph marker enhancements. It extends the existing Food Module Insight feature (the prior 'Food Glucose Impact Card / 2.5') and the diabetes elog workflow rather than standing alone.",
+  "affectedLayers": ["api", "domain", "data", "infra"],
+  "targetProjects": [
+    "Welldoc.Web.Member.API",
+    "Welldoc.Mesh.Communication.DTO_DotNetCore",
+    "Welldoc.Web.Service_DotNetCore",
+    "Welldoc.Server.Infra.JSONRepository",
+    "Welldoc.Integration.Libre_DotNetCore"
+  ],
+  "graphNotes": [
+    "Graph re-indexed 2026-06-08: lookups now resolve cleanly to the in-scope net8 tree (Welldoc.Web.Member.API / *_DotNetCore) with ambiguous=false and no legacy 4.8 twins. The earlier Welldoc.Web.WebApi / Welldoc.Web.Service duplicates are gone.",
+    "RESOLVED prior unknown: the existing 'Food Glucose Impact Card (2.5 requirements)' maps to the Food Module Insight feature - DTOs FoodModuleInsightRequest/Response/DetailDTO (Mesh) + view DTOs FoodModuleInsightDTO/Detail, generated via DiabetesElogBridgeService.SaveFoodModuleInsights*/GetInsightApiRequest*/GetFooduModuleInsight and triggered on food-add by FoodInsightForFoodAddTriggerWorkFlow. The existing category-based insight (Category2/3/4) is the analog of the new impact categorization.",
+    "DiabetesElogWorkflow already emits EventBus domain events on food log create/update (GenerateFoodItemsCreatedEvent, GenerateFoodItemsUpdatedEvent, FoodCombinationUpdateEvent) - the grounded mechanism for the background-timer materialization option (AV-004), consistent with tech_standards Section 5.4 (WellDoc.Domain.EventBus / MESSAGE_BROKER_TYPE)."
+  ],
+  "seedSymbols": [
+    {
+      "name": "MealController.Create / Update / Delete",
+      "graphId": "mesh_mealcontroller_mealcontroller",
+      "sourceFile": "Welldoc.Web.Member.API/Welldoc.Web.Member.API/Controllers/Mesh/MealController.cs",
+      "relation": "references",
+      "confidence": "1",
+      "ambiguous": false,
+      "note": "Meal-log API surface. Create = predicted-label trigger (BL-003); Update = in-window carb re-evaluation without resetting the 2h timer (BL-007/008); Delete = dismiss label + suppress card + re-evaluate group (constraint)."
+    },
+    {
+      "name": "FoodController (GetFoodCarbInsightMessage / GetFoodModuleLookupData)",
+      "graphId": "mesh_foodcontroller_foodcontroller",
+      "sourceFile": "Welldoc.Web.Member.API/Welldoc.Web.Member.API/Controllers/Mesh/FoodController.cs",
+      "relation": "references",
+      "confidence": "1",
+      "ambiguous": false,
+      "note": "Food Module logging + carb-insight host (uses FoodBridge). GetFoodCarbInsightMessage (CarbInsightRequestDTO -> FoodCarbInsightMessageDTO) is the precedent shape for the carb-based predicted label (BL-005). A new predicted-label / impact endpoint should follow this controller's conventions (ControllerBase, [WelldocAuthorize], FoodBridge, IHttpContextAccessor)."
+    },
+    {
+      "name": "AGPGraphController.GetAGPGraphData",
+      "graphId": "controllers_agpgraphcontroller_agpgraphcontroller_getagpgraphdata",
+      "sourceFile": "Welldoc.Web.Member.API/Welldoc.Web.Member.API/Controllers/AGPGraphController.cs",
+      "relation": "references",
+      "confidence": "1",
+      "ambiguous": false,
+      "note": "CGM graph data endpoint (AgpGraphRequestDTO -> AgpGraphDTO). Blue-dotted per-meal markers, one per individual log even within a group (BL-026/027), extend this response."
+    },
+    {
+      "name": "DiabetesElogWorkflow (Create / Update / GetElogCarbEntryFromDB / GetElogFoodItemFromDB)",
+      "graphId": "diabetes_diabeteselogworkflow_diabeteselogworkflow",
+      "sourceFile": "Welldoc.Web.Service_DotNetCore/Welldoc.Mesh.Workflow/Diabetes/DiabetesElogWorkflow.cs",
+      "relation": "calls",
+      "confidence": "1",
+      "ambiguous": false,
+      "note": "PRIMARY domain workflow for meal logging. Create/Update are where carb-based prediction attaches at log/edit time; GetElogCarbEntryFromDB/GetElogFoodItemFromDB supply carbs for the band logic (BL-005/007). Implements IDiabetesElogWorkflow (Welldoc.Mesh.Workflow.Contracts), resolved via WorkflowFactory."
+    },
+    {
+      "name": "DiabetesElogWorkflow food events (GenerateFoodItemsCreatedEvent / GenerateFoodItemsUpdatedEvent / FoodCombinationUpdateEvent)",
+      "graphId": "diabetes_diabeteselogworkflow_diabeteselogworkflow_generatefooditemscreatedevent",
+      "sourceFile": "Welldoc.Web.Service_DotNetCore/Welldoc.Mesh.Workflow/Diabetes/DiabetesElogWorkflow.cs",
+      "relation": "references",
+      "confidence": "0.9",
+      "ambiguous": false,
+      "note": "Existing EventBus events fired on food log create/update/combination. NOT on the critical path given the Checkpoint B compute-on-read decision (no background materialization). Retained as a reference only - may be used to invalidate any read cache, not to drive the 2h timer."
+    },
+    {
+      "name": "DiabetesElogBridgeService.GetExistingCarbsValue / GetExistingJustCarbsValue",
+      "graphId": "diabetes_diabeteselogbridgeservice_diabeteselogbridgeservice_getexistingcarbsvalue",
+      "sourceFile": "Welldoc.Web.Service_DotNetCore/Welldoc.Mesh.Communication.Workflow.Bridge/Diabetes/DiabetesElogBridgeService.cs",
+      "relation": "calls",
+      "confidence": "1",
+      "ambiguous": false,
+      "note": "Existing carb-retrieval helpers - reuse for the carb-band predictor (BL-005) and the edit re-evaluation (BL-007). Graph shows no callers (utility), so blast radius of reuse is low."
+    },
+    {
+      "name": "DiabetesElogBridgeService Food Module Insight family (SaveFoodModuleInsights[+ForCategory2/3/4], GetInsightApiRequest[+Category2/3/4/ForNoFoodLog], GenerateMessageForPatientsWith*NutrientTarget, GetFooduModuleInsight, PostFoodModuleInsightFeedback, GetPatientDetailsForFoodInsight)",
+      "graphId": "diabetes_diabeteselogbridgeservice_diabeteselogbridgeservice_getfoodumoduleinsight",
+      "sourceFile": "Welldoc.Web.Service_DotNetCore/Welldoc.Mesh.Communication.Workflow.Bridge/Diabetes/DiabetesElogBridgeService.cs",
+      "relation": "references",
+      "confidence": "0.9",
+      "ambiguous": false,
+      "note": "This IS the existing 'Food Glucose Impact Card (2.5)' surface (Food Module Insight). The new predicted label and CGM-delta impact card extend this category-based insight rather than creating a parallel feature. Decide whether to add a new category vs a sibling capability at Checkpoint B."
+    },
+    {
+      "name": "FoodInsightForFoodAddTriggerWorkFlow",
+      "graphId": "welldoc_web_workflow_foodinsightforfoodaddtriggerworkflow_foodinsightforfoodaddtriggerworkflow",
+      "sourceFile": "Welldoc.Web.Service_DotNetCore/Welldoc.Web.Workflow/FoodInsightForFoodAddTriggerWorkFlow.cs",
+      "relation": "references",
+      "confidence": "0.9",
+      "ambiguous": false,
+      "note": "Existing 'on food add -> generate insight + save history + call third-party API' trigger workflow. Direct precedent (and likely extension point) for the immediate predicted-label trigger (BL-003)."
+    },
+    {
+      "name": "DiabetesElogWorkflow / DiabetesElogBridgeService food-combination methods (Create/Update/Delete/Get FoodCombination, GetFoodCombinationItemDetails, GetSyncSavedMealWrapper)",
+      "graphId": "diabetes_diabeteselogworkflow_diabeteselogworkflow_getfoodcombination",
+      "sourceFile": "Welldoc.Web.Service_DotNetCore/Welldoc.Mesh.Workflow/Diabetes/DiabetesElogWorkflow.cs",
+      "relation": "references",
+      "confidence": "0.7",
+      "ambiguous": false,
+      "note": "Existing 'food combination' mechanism that models multi-item meals. DECIDED at Checkpoint B: do NOT reuse for this feature - the 30-min grouping is a NEW time-window concept. Listed for awareness/contrast so a slice does not accidentally entangle with food-combinations."
+    },
+    {
+      "name": "DiabetesElogBridgeService.GetGlucoseContentDetails / SyncCGMBG / GetCGMAIPredictionDetails (IDiabetesElogBridgeService)",
+      "graphId": "diabetes_diabeteselogbridgeservice_diabeteselogbridgeservice_getglucosecontentdetails",
+      "sourceFile": "Welldoc.Web.Service_DotNetCore/Welldoc.Mesh.Communication.Workflow.Bridge/Diabetes/DiabetesElogBridgeService.cs",
+      "relation": "calls",
+      "confidence": "0.8",
+      "ambiguous": false,
+      "note": "CGM reading path (interface IDiabetesElogBridgeService in Welldoc.Mesh.Gateway.Contracts). Source for delta_CGM_food (peak in +2h, trough in -30min) per BL-016. Confirm which method yields the raw CGM time-series usable for peak/trough extraction (callees not indexed - delegates to a platform binary)."
+    },
+    {
+      "name": "GlucosePredictionDTO / GlucosePredictionRequestDTO / PredictedGlucoseDTO",
+      "graphId": null,
+      "sourceFile": "Welldoc.Mesh.Communication.DTO_DotNetCore/Welldoc.Mesh.Communication.DTO/GlucosePredictionDTO.cs",
+      "relation": "references",
+      "confidence": "1",
+      "ambiguous": false,
+      "note": "Existing CGM glucose-forecast contracts (predicted glucose CURVE). NOT the food impact label/card - do not overload. Listed to prevent the decomposer from reusing the wrong DTO."
+    },
+    {
+      "name": "FoodModuleInsight DTOs (FoodModuleInsightRequestDTO / FoodModuleInsightResponseDTO / FoodModuleInsightDetailDTO; view DTOs FoodModuleInsightDTO / FoodModuleInsightDetail)",
+      "graphId": null,
+      "sourceFile": "Welldoc.Mesh.Communication.DTO_DotNetCore/Welldoc.Mesh.Communication.DTO/FoodModule/FoodModuleInsightResponseDTO.cs",
+      "relation": "references",
+      "confidence": "0.9",
+      "ambiguous": false,
+      "note": "Existing insight contract to extend for the predicted label and impact card (or to mirror for new sibling DTOs). View DTOs live in Welldoc.Web.Service_DotNetCore/Welldoc.Web.View.DTO/Elog/."
+    },
+    {
+      "name": "LibreConnectController + DexcomPilotIntegrationWorkflow (eligibility)",
+      "graphId": null,
+      "sourceFile": "Welldoc.Web.Member.API/Welldoc.Web.Member.API/Controllers/LibreConnectController.cs",
+      "relation": "references",
+      "confidence": "0.7",
+      "ambiguous": false,
+      "note": "Eligibility (BL-001): feature applies only to an active LIBRE CGM connection; Dexcom is excluded (a real Dexcom/DexcomPilotIntegrationWorkflow exists, so the exclusion is meaningful). Confirm the canonical 'active Libre CGM' check and the DM / MR1.x-MR4.x segment source (BL-002)."
+    },
+    {
+      "name": "CGMPredictionController.GetCGMProbabilityPrediction",
+      "graphId": "genai_cgmpredictioncontroller_cgmpredictioncontroller_getcgmprobabilityprediction",
+      "sourceFile": "Welldoc.Web.Member.API/Welldoc.Web.Member.API/Controllers/GenAI/CGMPredictionController.cs",
+      "relation": "references",
+      "confidence": "1",
+      "ambiguous": false,
+      "note": "Existing CGM probability prediction (GenAI). Controller-placement precedent only; distinct from food-carb impact."
+    },
+    {
+      "name": "FoodGlucosePrediction capability (carb-band predictor, CGM-delta calculator, 30-min grouping engine, 2h label/card lifecycle, new/extended DTOs)",
+      "graphId": null,
+      "sourceFile": null,
+      "relation": "new",
+      "confidence": null,
+      "ambiguous": false,
+      "note": "NEW logic: carb-band predictor (BL-005), CGM-delta calculator (BL-016/017), 30-min grouping with summed carbs (BL-018/020), 2h predicted-label + card lifecycle (BL-006/019). DECIDED at Checkpoint B: persist via Welldoc.Server.Infra.JSONRepository (Mongo, I*Repository + JSONRepositoryFactory); COMPUTE-ON-READ for both predicted-label-active (t..t+2h) and impact-card materialization (no background job); 30-min grouping implemented as a NEW time-window concept, separate from the existing food-combination mechanism. No EF."
+    }
+  ],
+  "acceptanceCriteria": [
+    { "id": "AC-001", "text": "Given a non-Libre (e.g. Dexcom) or no-CGM user, When a meal is logged, Then no prediction label is shown.", "verifies": ["BL-001"], "verifiesText": "BL-001: Feature triggers only for users with an active CGM connection; Libre users only, not Dexcom." },
+    { "id": "AC-002", "text": "Given an eligible user logs a meal of N g carbs, When logging completes, Then the predicted label = Low (N<=20) / Medium (21<=N<=100) / High (N>100).", "verifies": ["BL-005"], "verifiesText": "BL-005: Predicted impact (carb-based): <=20g Low; 21-100g (inclusive) Medium; >100g High (100g = Medium, Checkpoint A)." },
+    { "id": "AC-003", "text": "Given a meal logged at t, When 2h elapse, Then the predicted label is dismissed at exactly t+2h.", "verifies": ["BL-006"], "verifiesText": "BL-006: Prediction label remains active exactly 2 hours post food logging; after 2 hours it is dismissed." },
+    { "id": "AC-004", "text": "Given a meal edited within the window, When the edit is saved, Then carbs are re-evaluated immediately and the label updates, with the t+2h timer unchanged.", "verifies": ["BL-007", "BL-008"], "verifiesText": "BL-007: Editing within the 2h window re-evaluates carbs immediately and updates the label. BL-008: Editing does not reset the 2h countdown; dismissal/card timing stays anchored to the original log time." },
+    { "id": "AC-005", "text": "Given any logging method (photo/barcode/nutrition label/food search/AL meal/database meal), When a meal is logged, Then the prediction triggers.", "verifies": ["BL-003"], "verifiesText": "BL-003: Immediately after a meal is logged (photo, barcode, nutrition label, food search, AL meal, or database meal) in the Food Module, analyze carbs and display a prediction label under the logged meal." },
+    { "id": "AC-006", "text": "Given a single logged meal at t, When t+2h is reached, Then a Food Glucose Impact Card appears on My Glucose with the CGM-delta label.", "verifies": ["BL-019", "BL-016", "BL-017"], "verifiesText": "BL-019: Single meal generates the Glucose Impact Card exactly 2h after logging. BL-016: delta_CGM_food = peak(CGM, +2h) - trough(CGM, -30min); grouped: trough before first log, peak after last log. BL-017: <20 Low; 20-50 (inclusive) Medium; >50 High mg/dL." },
+    { "id": "AC-007", "text": "Given CGM data, When the card is computed, Then label = Low (delta<20) / Medium (20<=delta<=50) / High (delta>50) mg/dL.", "verifies": ["BL-017"], "verifiesText": "BL-017: Actual impact label (delta-based): <20 Low; 20-50 (inclusive) Medium; >50 High mg/dL (50 = Medium, Checkpoint A)." },
+    { "id": "AC-008", "text": "Given two meals logged < 30 min apart, When 2h elapse after the last in-window log, Then their carbs are summed into one grouped card timestamped at the first log.", "verifies": ["BL-020", "BL-012"], "verifiesText": "BL-020: 30-min window begins at the initial log; food logged <30min after is grouped, carbs summed; one card, timestamped at the first log, materializing 2h after the LAST in-window log. BL-012: Card timestamp HH:MM [AM/PM]; for grouped meals show the first item's timestamp." },
+    { "id": "AC-009", "text": "Given a second meal logged >= 30 min after the first, When logged, Then it produces its own separate prediction and card.", "verifies": ["BL-021", "BL-022"], "verifiesText": "BL-021: Food logged outside 30 min of the initial log starts a new separate window and its own card. BL-022: A second meal logged >30 min after the first is a distinct event with its own card." },
+    { "id": "AC-010", "text": "Given the Impact Card, When rendered, Then it shows meal type, HH:MM [AM/PM], MMM DD (year hidden), comma-separated ellipsis-truncated food list, and a thumbnail circle colored by impact.", "verifies": ["BL-011", "BL-012", "BL-013", "BL-014", "BL-015"], "verifiesText": "BL-011 meal type; BL-012 HH:MM [AM/PM] (first item for groups); BL-013 MMM DD, year hidden across years; BL-014 comma-separated list from first item, ellipsis if >1 line; BL-015 thumbnail circle colored High=Red/Medium=Yellow/Low=Green." },
+    { "id": "AC-011", "text": "Given multiple meals within the grouping window, When the CGM graph renders, Then one blue dotted bar appears per individual log at its exact timestamp.", "verifies": ["BL-026", "BL-027"], "verifiesText": "BL-026: For every unique food log, a vertical blue dotted bar at the exact log timestamp. BL-027: Within a 30-min group, a separate bar per individual meal, even though they map to one card." },
+    { "id": "AC-012", "text": "Given the Logged Meals section, When the info hyperlink is tapped, Then an overlay opens; When X is tapped, Then it closes.", "verifies": ["BL-009", "BL-010"], "verifiesText": "BL-009: Display the 'How do we predict the glucose impact?' hyperlink below the Logged Meals title and above all logged meals. BL-010: Tapping it opens an overlay (content per content sheet) with an X that closes it." },
+    { "id": "AC-013", "text": "Given an Impact Card, When tapped, Then the Detail Screen for Glucose Impact Food opens.", "verifies": ["BL-024"], "verifiesText": "BL-024: Clicking the Food Glucose Impact Card navigates to the Detail Screen for Glucose Impact Food (per current implementation)." }
+  ],
+  "requirement_mappings": {
+    "modules": {
+      "Food Module": [
+        "MealController.Create / Update / Delete",
+        "FoodController (GetFoodCarbInsightMessage / GetFoodModuleLookupData)",
+        "DiabetesElogWorkflow (Create / Update / GetElogCarbEntryFromDB / GetElogFoodItemFromDB)",
+        "DiabetesElogBridgeService Food Module Insight family (SaveFoodModuleInsights[+ForCategory2/3/4], GetInsightApiRequest[+Category2/3/4/ForNoFoodLog], GenerateMessageForPatientsWith*NutrientTarget, GetFooduModuleInsight, PostFoodModuleInsightFeedback, GetPatientDetailsForFoodInsight)",
+        "FoodGlucosePrediction capability (carb-band predictor, CGM-delta calculator, 30-min grouping engine, 2h label/card lifecycle, new/extended DTOs)"
+      ],
+      "CGM Connection Service": [
+        "DiabetesElogBridgeService.GetGlucoseContentDetails / SyncCGMBG / GetCGMAIPredictionDetails (IDiabetesElogBridgeService)",
+        "LibreConnectController + DexcomPilotIntegrationWorkflow (eligibility)",
+        "AGPGraphController.GetAGPGraphData"
+      ]
+    },
+    "apis": {
+      "Meal Logging API": "MealController.Create / Update / Delete",
+      "Carb Content Analysis API": "FoodController (GetFoodCarbInsightMessage / GetFoodModuleLookupData)",
+      "CGM Data API": "AGPGraphController.GetAGPGraphData",
+      "Food Glucose Prediction API": "FoodGlucosePrediction capability (carb-band predictor, CGM-delta calculator, 30-min grouping engine, 2h label/card lifecycle, new/extended DTOs)"
+    },
+    "flows": {
+      "Food Glucose Prediction Flow": [
+        "MealController.Create / Update / Delete",
+        "DiabetesElogWorkflow (Create / Update / GetElogCarbEntryFromDB / GetElogFoodItemFromDB)",
+        "FoodGlucosePrediction capability (carb-band predictor, CGM-delta calculator, 30-min grouping engine, 2h label/card lifecycle, new/extended DTOs)"
+      ]
+    }
+  },
+  "outOfScope": [
+    "Dexcom CGM users - feature is Libre-only (BL-001).",
+    "Non-DM conditions and MR segments outside MR1.x-MR4.x (BL-002).",
+    "Historical / backfilled meal logs - no retroactive predictions or cards for meals logged before the feature ships.",
+    "Detail Screen and base CGM-graph rendering - reused unchanged (BL-023/024/025); only the multi-meal blue-dotted markers (BL-027) are new."
+  ],
+  "constraints": [
+    "Missing/uncomputable CGM delta (sensor gap, no trough in -30min or no peak in +2h, Libre disconnected): suppress the Impact Card silently for that meal; the predicted label still behaves normally during its window.",
+    "Meal deleted within the 2h window: dismiss the predicted label and produce no Impact Card; for a grouped meal, re-evaluate the group with the remaining items.",
+    "Backdated entry whose 2h window is entirely in the past: generate no predicted label or card (consistent with historical backfill being out of scope) [derived - confirm].",
+    "Each card computes its delta independently over its own anchored window; shared CGM readings may contribute to more than one card - no cross-card de-duplication [derived - confirm].",
+    "Use the existing platform timestamp/timezone handling ('current implementation') for all 2h/30-min window math and HH:MM / MMM DD display [derived - confirm].",
+    "PHI: CGM glucose + meal data is PHI (Cyber security gate = Y). Commit no new secrets; do not log secret values.",
+    "net8 standards (tech_standards.md): controllers ControllerBase + [ApiController] + [Route(\"api/[controller]\")] + explicit [Http*]/[Route], inject IHttpContextAccessor; config via Environment.GetEnvironmentVariable with keys under AppSettings; NO Entity Framework (use MongoDB.Driver via Infra.JSONRepository for this feature's state); Welldoc domain factories via static *FactoryLocator / WorkflowFactory (not the DI container); Libre access via Welldoc.Integration.Libre_DotNetCore.",
+    "Checkpoint B architecture decision: persist new state in Welldoc.Server.Infra.JSONRepository (Mongo, I*Repository + JSONRepositoryFactory); COMPUTE-ON-READ for predicted-label visibility (active during t..t+2h) and impact-card materialization (no background job / no scheduler); implement the 30-min grouping as a NEW time-window concept, separate from the existing food-combination mechanism.",
+    "Gates answered at Checkpoint A: Risk Analysis = Y, Data Requirements = Y, Designs available = Y, Cyber security = Y, CRM = N."
+  ],
+  "resolvedAtCheckpointB": [
+    "Persistence: new predicted-label/card/grouping state stored in Welldoc.Server.Infra.JSONRepository (Mongo).",
+    "Timer model: COMPUTE-ON-READ - predicted-label visibility and impact-card materialization are computed when the client reads; no background job/scheduler.",
+    "Grouping: NEW 30-min time-window concept, separate from the existing food-combination mechanism."
+  ],
+  "unresolved": [
+    { "name": "Detail Screen for Glucose Impact Food endpoint", "specRef": "Feature_Spec_AL-27103.md BL-024 / L178", "note": "Referenced as 'current implementation' (out of scope to change) but the exact existing endpoint the card deep-links to is not pinned. Minor - confirm during slice review." }
+  ]
+}
