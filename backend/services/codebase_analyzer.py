@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -42,6 +43,8 @@ try:
         find_implemented_interfaces,
         find_callers,
         find_callees,
+        find_containing_class,
+        find_related_dtos,
         find_methods,
     )
 except ImportError:
@@ -54,6 +57,8 @@ except ImportError:
     find_implemented_interfaces = None  # type: ignore
     find_callers = None  # type: ignore
     find_callees = None  # type: ignore
+    find_containing_class = None  # type: ignore
+    find_related_dtos = None  # type: ignore
     find_methods = None  # type: ignore
 
 
@@ -142,6 +147,78 @@ def _load_contract(path: str) -> Dict[str, Any]:
         return json.load(fh)
 
 
+def _class_from_source_file(source_file: str) -> str:
+    if not source_file:
+        return ""
+    name = source_file.replace("\\", "/").split("/")[-1]
+    return name[:-3] if name.endswith(".cs") else name
+
+
+def _method_from_symbol(symbol: str) -> str:
+    symbol = (symbol or "").strip()
+    if not symbol:
+        return ""
+    if symbol.startswith("."):
+        return symbol.lstrip(".").replace("()", "")
+    if "." in symbol and not symbol.endswith(".cs"):
+        tail = symbol.rsplit(".", 1)[-1]
+        if re.match(r"^[A-Za-z_]\w*(?:\(\))?$", tail):
+            return tail.replace("()", "")
+    return ""
+
+
+def _normalize_symbol_metadata(node: Dict[str, Any]) -> Dict[str, str]:
+    label = (node.get("label") or "").strip()
+    source_file = node.get("source_file", "") or ""
+    source_class = _class_from_source_file(source_file)
+    method_name = _method_from_symbol(label)
+
+    class_name = source_class
+    if not class_name and label and not label.startswith(".") and not label.endswith(".cs"):
+        class_name = label.split(".", 1)[0]
+
+    normalized = label
+    if label.startswith("."):
+        normalized = f"{class_name}{label}" if class_name else label.lstrip(".")
+    return {
+        "normalized_symbol": normalized,
+        "class_name": class_name,
+        "method_name": method_name,
+        "source_location": node.get("source_location", ""),
+        "graph_id": node.get("id", ""),
+    }
+
+
+def _unique_peers(result: Dict[str, Any], limit: int = 8) -> List[str]:
+    peers = []
+    for item in result.get("results", []) if result else []:
+        peer = item.get("peer") or item.get("label") or item.get("peer_id")
+        if peer and peer not in peers:
+            peers.append(peer)
+    return peers[:limit]
+
+
+def _method_impact(method: str, owner_class: str = "", source_file: str = "") -> Dict[str, str]:
+    name = _method_from_symbol(method) or method.split("_")[-1].replace("()", "")
+    return {
+        "method": method,
+        "method_name": name,
+        "owner_class": owner_class,
+        "source_file": source_file,
+    }
+
+
+def _dto_candidates_for_mapping(label: str, note: str = "") -> List[str]:
+    dto_re = re.compile(r"\b[A-Z][A-Za-z0-9]*(?:DTO|Dto|Request|Response|Model)\b")
+    values = set(dto_re.findall(f"{label} {note}"))
+    if find_related_dtos and label:
+        try:
+            values.update(_unique_peers(find_related_dtos(label), limit=12))
+        except Exception:  # noqa: BLE001
+            pass
+    return sorted(values)
+
+
 def _symbol_mapping_from_node(
     node: Dict[str, Any],
     note: str = "",
@@ -152,28 +229,43 @@ def _symbol_mapping_from_node(
     is_new_capability: bool = False,
 ) -> Dict[str, Any]:
     label = node.get("label", "")
+    symbol_meta = _normalize_symbol_metadata(node)
+    owner_class = symbol_meta.get("class_name", "")
+    methods: List[str] = []
+
+    if find_containing_class and symbol_meta.get("method_name"):
+        try:
+            owners = _unique_peers(find_containing_class(label), limit=1)
+            if owners:
+                owner_class = owners[0]
+                symbol_meta["class_name"] = owner_class
+                if label not in methods:
+                    methods.append(label)
+        except Exception:  # noqa: BLE001
+            pass
+
     mapping: Dict[str, Any] = {
         "codebase_symbol": label,
+        **symbol_meta,
         "source_file": node.get("source_file", ""),
+        "source_location": node.get("source_location", ""),
         "note": note or node.get("note", ""),
         "base_classes": [],
         "implemented_interfaces": [],
-        "methods": [],
+        "methods": methods,
+        "method_impacts": [],
+        "dtos": [],
         "callers": extra_callers or [],
         "callees": extra_callees or [],
         "mapping_confidence": mapping_confidence,
         "is_new_capability": is_new_capability,
     }
     if find_base_class and label:
-        mapping["base_classes"] = [
-            b["peer"] for b in find_base_class(label).get("results", [])
-        ]
-        mapping["implemented_interfaces"] = [
-            i["peer"] for i in find_implemented_interfaces(label).get("results", [])
-        ]
-        mapping["methods"] = [
-            m["peer"] for m in find_methods(label).get("results", [])
-        ]
+        mapping["base_classes"] = _unique_peers(find_base_class(label), limit=5)
+        mapping["implemented_interfaces"] = _unique_peers(find_implemented_interfaces(label), limit=8)
+        declared_methods = _unique_peers(find_methods(label), limit=20)
+        if declared_methods:
+            mapping["methods"] = declared_methods
         if not mapping["callers"] or not mapping["callees"]:
             callers, callees = _resolve_call_graph_for_node(
                 node, links_index, mapping["methods"]
@@ -182,6 +274,15 @@ def _symbol_mapping_from_node(
                 mapping["callers"] = callers
             if not mapping["callees"]:
                 mapping["callees"] = callees
+    mapping["method_impacts"] = [
+        _method_impact(m, mapping.get("class_name", ""), mapping.get("source_file", ""))
+        for m in mapping.get("methods", [])[:12]
+    ]
+    if not mapping["method_impacts"] and symbol_meta.get("method_name"):
+        mapping["method_impacts"] = [
+            _method_impact(label, mapping.get("class_name", ""), mapping.get("source_file", ""))
+        ]
+    mapping["dtos"] = _dto_candidates_for_mapping(label, mapping.get("note", ""))
     return mapping
 
 

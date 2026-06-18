@@ -34,6 +34,92 @@ MDD_SECTIONS = [
     ]},
 ]
 
+MDD_SECTION_CONTRACT = {
+    "purpose_and_scope": {
+        "heading": "### 1.1 Purpose and Scope",
+        "must_cover": [
+            "module purpose",
+            "in-scope responsibilities",
+            "out-of-scope responsibilities or missing scope called out as To be confirmed",
+            "source requirements and mapped module context",
+        ],
+    },
+    "definitions": {
+        "heading": "### 1.2 Definitions and Acronyms",
+        "must_cover": ["terms and acronyms present in source documentation"],
+    },
+    "references": {
+        "heading": "### 1.3 References",
+        "must_cover": ["source documents and relationship to this module"],
+    },
+    "architecture_overview": {
+        "heading": "### 2.1 Architecture Overview",
+        "must_cover": [
+            "module role in the HLD architecture",
+            "target projects and mapped code symbols",
+            "existing components touched",
+            "new or modified behavior required by the feature",
+            "dependencies and HLD design decisions",
+        ],
+    },
+    "use_case_flow": {
+        "heading": "## 3 Use Case Flow",
+        "must_cover": [
+            "trigger and preconditions",
+            "main success path",
+            "alternate or exception paths when present",
+            "business rules mapped to source AC/BL IDs when available",
+            "classes or APIs participating in each step",
+        ],
+    },
+    "component_design": {
+        "heading": "## 4 Component and Class Design",
+        "must_cover": [
+            "existing classes and source files",
+            "role of each class in this module",
+            "existing methods used or modified",
+            "new or modified methods / DTOs / contracts, or To be confirmed",
+            "validation and error handling considerations",
+        ],
+    },
+    "sequence_overview": {
+        "heading": "### 5.1 Sequence Overview",
+        "must_cover": [
+            "implementation-level interaction sequence",
+            "participant responsibilities",
+            "data passed between participants",
+            "module-specific behavior, not only HLD summary",
+        ],
+    },
+    "external_interfaces": {
+        "heading": "## 6 External System/Module Interface Design",
+        "must_cover": [
+            "input interfaces and provider modules",
+            "output interfaces and consuming modules",
+            "request/response payload expectations when available",
+            "mapped symbols and source files",
+            "validation, error, and missing-data behavior when available",
+        ],
+    },
+    "traceability": {
+        "heading": "### 7.1 Requirements Traceability Matrix",
+        "must_cover": [
+            "module-relevant AC/BL mappings only",
+            "mapped code symbol or Not mapped in code graph",
+        ],
+    },
+}
+
+MDD_QUALITY_RULES = [
+    "Keep the SOP-036 headings and order fixed.",
+    "Do not paste raw HLD excerpts into the final MDD.",
+    "Do not invent classes, APIs, DTOs, infrastructure, or persistence stores.",
+    "Use normalized code symbols from code_graph.mapping only.",
+    "Use 'To be confirmed' for implementation detail not present in source artifacts.",
+    "Keep traceability scoped to the selected module.",
+    "Every Mermaid block must pass structural validation.",
+]
+
 PLAN_JSON_SCHEMA = """
 {
   "module_name": "<string>",

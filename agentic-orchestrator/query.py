@@ -18,15 +18,21 @@ import sys
 from pathlib import Path
 
 INDEX_DIR = Path(__file__).parent / "index"
+_INDEX_CACHE = None
+_ID_INDEX_CACHE = None
 
 
 def load_indexes():
     """Load the two small precomputed indexes (fast — not the full graph)."""
+    global _INDEX_CACHE
+    if _INDEX_CACHE is not None:
+        return _INDEX_CACHE
     with open(INDEX_DIR / "nodes_index.json", "r", encoding="utf-8") as f:
         nodes_index = json.load(f)
     with open(INDEX_DIR / "links_index.json", "r", encoding="utf-8") as f:
         links_index = json.load(f)
-    return nodes_index, links_index
+    _INDEX_CACHE = (nodes_index, links_index)
+    return _INDEX_CACHE
 
 
 def canonical(name):
@@ -46,13 +52,37 @@ def canonical(name):
 
 def build_id_index(nodes_index):
     """Map node id -> node dict for direct graphId lookups from feature contracts."""
+    global _ID_INDEX_CACHE
+    if _ID_INDEX_CACHE is not None:
+        return _ID_INDEX_CACHE
     id_index = {}
     for nodes in nodes_index.values():
         for n in nodes:
             nid = n.get("id")
             if nid:
                 id_index[nid] = n
-    return id_index
+    _ID_INDEX_CACHE = id_index
+    return _ID_INDEX_CACHE
+
+
+def node_ref(node_id, id_index):
+    node = id_index.get(node_id) if node_id else None
+    if not node:
+        return {
+            "peer": node_id,
+            "peer_id": node_id,
+            "label": node_id,
+            "source_file": "",
+            "source_location": "",
+        }
+    return {
+        "peer": node.get("label") or node_id,
+        "peer_id": node_id,
+        "label": node.get("label") or "",
+        "source_file": node.get("source_file", ""),
+        "source_location": node.get("source_location", ""),
+        "node": node,
+    }
 
 
 def resolve_node_by_id(node_id, nodes_index):
@@ -105,7 +135,7 @@ def resolve_symbol(name, nodes_index):
     return chosen, alternatives
 
 
-def group_by_relation(entries, peer_key):
+def group_by_relation(entries, peer_key, id_index=None):
     """
     Group a list of link entries by their 'relation' type.
     peer_key is 'target' for outgoing links, 'source' for incoming.
@@ -114,9 +144,13 @@ def group_by_relation(entries, peer_key):
     grouped = {}
     for e in entries:
         rel = e.get("relation", "unknown")
+        peer = node_ref(e.get(peer_key), id_index or {})
         grouped.setdefault(rel, []).append({
-            "peer": e.get(peer_key),
+            **peer,
             "confidence": e.get("confidence"),
+            "edge_source_file": e.get("source_file", ""),
+            "edge_source_location": e.get("source_location", ""),
+            "context": e.get("context", ""),
         })
     return grouped
 
@@ -124,6 +158,7 @@ def group_by_relation(entries, peer_key):
 def find_neighbors(name):
     """Core query: resolve the symbol, then return its grouped in/out neighbors."""
     nodes_index, links_index = load_indexes()
+    id_index = build_id_index(nodes_index)
     chosen, alternatives = resolve_symbol(name, nodes_index)
 
     if chosen is None:
@@ -136,9 +171,50 @@ def find_neighbors(name):
         "found": True,
         "node": chosen,                      # {id, label, source_file}
         "alternatives": alternatives,        # other nodes sharing this name
-        "uses": group_by_relation(relationships["outgoing"], "target"),    # outgoing
-        "used_by": group_by_relation(relationships["incoming"], "source"), # incoming
+        "uses": group_by_relation(relationships["outgoing"], "target", id_index),    # outgoing
+        "used_by": group_by_relation(relationships["incoming"], "source", id_index), # incoming
     }
+
+
+def find_containing_class(name):
+    """Resolve a method/property node to its owning class-like node when present."""
+    result = find_neighbors(name)
+    if not result.get("found"):
+        return {"query": name, "found": False, "results": []}
+    candidates = []
+    for rel in ("method", "contains"):
+        candidates.extend(result.get("used_by", {}).get(rel, []))
+    class_like = [
+        c for c in candidates
+        if c.get("source_file") == result["node"].get("source_file")
+        and not str(c.get("label", "")).startswith(".")
+        and not str(c.get("label", "")).endswith(".cs")
+    ]
+    return {
+        "query": name,
+        "found": bool(class_like),
+        "node": result.get("node"),
+        "results": class_like or candidates,
+    }
+
+
+def _dto_tokens(text):
+    import re
+    return sorted(set(re.findall(r"\b[A-Z][A-Za-z0-9]*(?:DTO|Request|Response|Model)\b", text or "")))
+
+
+def find_related_dtos(name):
+    """Extract DTO-like names from a symbol's metadata and immediate neighbors."""
+    result = find_neighbors(name)
+    if not result.get("found"):
+        return {"query": name, "found": False, "results": []}
+    texts = [json.dumps(result.get("node", {}))]
+    for side in ("uses", "used_by"):
+        for peers in result.get(side, {}).values():
+            for peer in peers[:20]:
+                texts.append(json.dumps(peer))
+    dtos = sorted(set(dto for text in texts for dto in _dto_tokens(text)))
+    return {"query": name, "found": True, "results": [{"peer": dto, "confidence": None} for dto in dtos]}
 
 
 def print_human(result):

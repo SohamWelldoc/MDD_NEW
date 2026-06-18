@@ -27,6 +27,31 @@ GRAPH_PATH = Path(__file__).resolve().parent.parent / "graph.json"
 OUT_DIR = Path(__file__).parent / "index"
 
 
+def _node_entry(node: dict) -> dict:
+    """Preserve useful Graphify node metadata for downstream design docs."""
+    passthrough_keys = [
+        "id",
+        "label",
+        "norm_label",
+        "source_file",
+        "source_location",
+        "file_type",
+        "kind",
+        "type",
+        "signature",
+        "parameters",
+        "return_type",
+        "line_start",
+        "line_end",
+        "parent",
+        "container",
+        "namespace",
+        "note",
+        "community",
+    ]
+    return {key: node.get(key, "") for key in passthrough_keys if key in node}
+
+
 def build_index(graph_path: Path, out_dir: Path) -> bool:
     # 1. Sanity-check the input exists before we do anything expensive.
     if not graph_path.exists():
@@ -54,12 +79,7 @@ def build_index(graph_path: Path, out_dir: Path) -> bool:
     nodes_index = defaultdict(list)
     for n in nodes:
         norm = n.get("norm_label") or n.get("label", "").lower()
-        nodes_index[norm].append({
-            "id": n.get("id"),
-            "label": n.get("label"),
-            "source_file": n.get("source_file", ""),  # "" means external/framework stub
-            "note": n.get("note", ""),
-        })
+        nodes_index[norm].append(_node_entry(n))
 
     # 4. Build the links index: node_id -> {outgoing: [...], incoming: [...]}
     #    outgoing = this node is the SOURCE (things it uses / contains / calls)
@@ -73,11 +93,21 @@ def build_index(graph_path: Path, out_dir: Path) -> bool:
 
         # Record the edge on the source node's "outgoing" list...
         links_index[src]["outgoing"].append({
-            "target": tgt, "relation": relation, "confidence": confidence,
+            "target": tgt,
+            "relation": relation,
+            "confidence": confidence,
+            "source_file": l.get("source_file", ""),
+            "source_location": l.get("source_location", ""),
+            "context": l.get("context", ""),
         })
         # ...and on the target node's "incoming" list.
         links_index[tgt]["incoming"].append({
-            "source": src, "relation": relation, "confidence": confidence,
+            "source": src,
+            "relation": relation,
+            "confidence": confidence,
+            "source_file": l.get("source_file", ""),
+            "source_location": l.get("source_location", ""),
+            "context": l.get("context", ""),
         })
 
     # 5. Write the two index files.

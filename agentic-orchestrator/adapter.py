@@ -33,7 +33,7 @@ import json
 import sys
 
 # Reuse the proven resolve + walk from query.py (single source of truth).
-from query import find_neighbors
+from query import find_neighbors, find_containing_class as _find_containing_class, find_related_dtos as _find_related_dtos
 
 
 def _answer(name, direction, relation):
@@ -87,6 +87,33 @@ def find_methods(name):
     return _answer(name, "uses", "method")
 
 
+def find_containing_class(name):
+    """What class-like node contains this method/property?"""
+    result = _find_containing_class(name)
+    return {
+        "query": name,
+        "found": result.get("found", False),
+        "question": "used_by:method|contains",
+        "node": result.get("node"),
+        "ambiguous": len(result.get("results", [])) > 1,
+        "alternatives": result.get("results", [])[1:],
+        "results": result.get("results", []),
+    }
+
+
+def find_related_dtos(name):
+    """What DTO/Request/Response/Model names are near this symbol?"""
+    result = _find_related_dtos(name)
+    return {
+        "query": name,
+        "found": result.get("found", False),
+        "question": "related:dtos",
+        "results": result.get("results", []),
+        "ambiguous": False,
+        "alternatives": [],
+    }
+
+
 # --- Thin CLI wrapper (parsing + printing only; no logic) --------------------
 
 _COMMANDS = {
@@ -96,6 +123,8 @@ _COMMANDS = {
     "callers": find_callers,
     "callees": find_callees,
     "methods": find_methods,
+    "owner": find_containing_class,
+    "dtos": find_related_dtos,
 }
 
 

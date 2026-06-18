@@ -46,7 +46,10 @@ def _fix_block(block: str) -> str:
     lines = [re.sub(r",?\s*r[xy]:\s*\d+", "", ln) for ln in lines]
 
     # Fix 2: Remove trailing `>` after arrow labels  -->|text|>  ->  -->|text|
-    lines = [re.sub(r"(-->\|[^|]*\|)>", r"\1", ln) for ln in lines]
+    lines = [re.sub(r"((?:-->|-\.->|==>)\|[^|]*\|)>", r"\1", ln) for ln in lines]
+
+    # Fix 3: flowchart dashed arrows sometimes come back as -.->>; normalize to -.->.
+    lines = [re.sub(r"-\.->>", r"-.->", ln) for ln in lines]
 
     # Fix 6: graph TD -> flowchart TD (only on first non-blank line)
     for i, ln in enumerate(lines):
@@ -89,6 +92,20 @@ def _fix_block(block: str) -> str:
         else:
             fixed_edges.append(ln)
     lines = fixed_edges
+
+    # Fix 13: sequenceDiagram messages do not use flowchart-style |"label"| syntax.
+    fixed_sequence: List[str] = []
+    in_sequence = any(ln.strip().startswith("sequenceDiagram") for ln in lines[:2])
+    for ln in lines:
+        if in_sequence and "->>" in ln and ":" in ln:
+            prefix, msg = ln.split(":", 1)
+            msg = re.sub(r'\|\s*["\']?([^|"\']+)["\']?\s*\|', r"\1", msg)
+            msg = re.sub(r"\s+(?:-->|-\.->|==>|---).*$", "", msg).strip()
+            msg = msg.strip('"').strip("'")
+            fixed_sequence.append(f"{prefix}: {msg.strip()}")
+        else:
+            fixed_sequence.append(ln)
+    lines = fixed_sequence
 
     return "\n".join(lines)
 
@@ -144,6 +161,8 @@ def _semantic_issues(block: str) -> List[str]:
 
     if is_flowchart and re.search(r"^\s*participant\b", body, re.MULTILINE | re.IGNORECASE):
         issues.append("flowchart contains sequenceDiagram keyword 'participant'")
+    if is_flowchart and "->>" in body:
+        issues.append("flowchart contains sequenceDiagram arrow '->>'")
 
     if is_sequence:
         for ln in body.splitlines()[1:]:
@@ -155,6 +174,8 @@ def _semantic_issues(block: str) -> List[str]:
                 pid = m.group(1)
                 if " " in pid or "-" in pid:
                     issues.append(f"sequenceDiagram arrow uses invalid participant id '{pid}'")
+            if "-->" in ln or "-.->" in ln or "==>" in ln:
+                issues.append("sequenceDiagram message contains flowchart arrow syntax")
 
     return issues
 

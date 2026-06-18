@@ -49,7 +49,18 @@ def resolve_class_name(sym: str, source_file: str = "") -> Optional[str]:
 
 def _class_symbol(sym: str, source_file: str) -> Optional[str]:
     """Return a valid classDiagram class name, or None to skip."""
-    return resolve_class_name(sym, source_file)
+    cls = resolve_class_name(sym, source_file)
+    if not cls:
+        return None
+    cls = re.sub(r"\W", "_", cls)
+    return cls if re.match(r"^[A-Za-z_]\w*$", cls) else None
+
+
+def _safe_class_name(name: str) -> Optional[str]:
+    if not name:
+        return None
+    cls = re.sub(r"\W", "_", name)
+    return cls if re.match(r"^[A-Za-z_]\w*$", cls) else None
 
 
 def _class_from_file(source_file: str) -> str:
@@ -66,20 +77,65 @@ def _short_method(method: str) -> str:
     return short.replace("()", "")[:40]
 
 
+def _method_from_symbol(symbol: str) -> str:
+    """Extract method name from `.Method()` or `Class.Method()` symbols."""
+    symbol = (symbol or "").strip()
+    if not symbol:
+        return ""
+    if symbol.startswith("."):
+        return symbol.lstrip(".").replace("()", "")
+    if "." in symbol and not symbol.startswith("."):
+        tail = symbol.rsplit(".", 1)[-1].strip()
+        if tail and re.match(r"^[A-Za-z_]\w*(?:\(\))?$", tail):
+            return tail.replace("()", "")
+    return ""
+
+
+def _fallback_methods_for_mapping(cb: Dict[str, Any]) -> List[str]:
+    """Generic classDiagram method fallback when code_graph methods[] is empty."""
+    methods = cb.get("method_impacts") or cb.get("methods") or []
+    if methods:
+        labels: List[str] = []
+        for method in methods[:5]:
+            if isinstance(method, dict):
+                raw = method.get("method_name") or method.get("display_name") or method.get("method") or ""
+            else:
+                raw = str(method)
+            short = _short_method(raw)
+            if short:
+                labels.append(short)
+        if labels:
+            return labels
+
+    symbol_method = cb.get("method_name") or _method_from_symbol(
+        cb.get("codebase_symbol") or cb.get("raw_symbol") or cb.get("normalized_symbol", "")
+    )
+    if symbol_method:
+        return [symbol_method[:40]]
+
+    note = (cb.get("note") or "").lower()
+    if "eligib" in note:
+        return ["eligibility"]
+    if cb.get("is_new_capability") or "new capability" in note:
+        return ["mappedCapability"]
+
+    return ["..."]
+
+
 def build_architecture_flowchart(bundle: Dict[str, Any]) -> str:
     """§2.1 internal module structure — flowchart TD from mapped symbols."""
     mapping = bundle.get("mapping") or {}
-    cbs = mapping.get("codebase_mappings") or []
+    cbs = bundle.get("component_evidence") or mapping.get("codebase_mappings") or []
     if not cbs:
         return ""
 
     used: Set[str] = set()
     id_by_cls: Dict[str, str] = {}
-    lines = ["flowchart TD"]
+    lines = ["flowchart LR"]
 
     for cb in cbs:
-        sym = cb.get("codebase_symbol", "")
-        cls = _class_symbol(sym, cb.get("source_file", ""))
+        sym = cb.get("codebase_symbol") or cb.get("raw_symbol") or cb.get("normalized_symbol", "")
+        cls = _safe_class_name(cb.get("class_name", "")) or _class_symbol(sym, cb.get("source_file", ""))
         if not cls or cls in id_by_cls:
             continue
         nid = _safe_id(cls, used)
@@ -110,7 +166,7 @@ def build_use_case_flowchart(bundle: Dict[str, Any]) -> str:
 
     used: Set[str] = set()
     node_labels: Dict[str, str] = {}
-    lines = ["flowchart TD"]
+    lines = ["flowchart LR"]
 
     def _node(comp: str) -> str:
         if comp not in node_labels:
@@ -118,22 +174,21 @@ def build_use_case_flowchart(bundle: Dict[str, Any]) -> str:
             lines.append(f"    {node_labels[comp]}[{_quote_label(comp)}]")
         return node_labels[comp]
 
+    step_number = 1
     for flow in flows:
         prev_dst: Optional[str] = None
         for step in flow.get("step_by_step_sequence") or []:
             src = step.get("source_component", "Source")
             dst = step.get("destination_component", "Destination")
-            op = (step.get("operation_signature") or "")[:50]
+            op_label = str(step.get("step_number") or step_number)
 
             src_id = _node(src)
             dst_id = _node(dst)
             from_id = prev_dst if prev_dst else src_id
 
-            if op:
-                lines.append(f"    {from_id} -->|{_quote_label(op)}| {dst_id}")
-            else:
-                lines.append(f"    {from_id} --> {dst_id}")
+            lines.append(f"    {from_id} -->|{_quote_label(op_label)}| {dst_id}")
             prev_dst = dst_id
+            step_number += 1
 
     return "\n".join(lines) if len(lines) > 1 else ""
 
@@ -141,29 +196,29 @@ def build_use_case_flowchart(bundle: Dict[str, Any]) -> str:
 def build_class_diagram(bundle: Dict[str, Any]) -> str:
     """§4 classDiagram from codebase_mappings (top classes, short methods)."""
     mapping = bundle.get("mapping") or {}
-    cbs = mapping.get("codebase_mappings") or []
+    cbs = bundle.get("component_evidence") or mapping.get("codebase_mappings") or []
     if not cbs:
         return ""
 
     lines = ["classDiagram"]
     declared: Set[str] = set()
+    class_order: List[str] = []
 
     for cb in cbs[:6]:
-        sym = cb.get("codebase_symbol", "")
+        sym = cb.get("codebase_symbol") or cb.get("raw_symbol") or cb.get("normalized_symbol", "")
         src = cb.get("source_file", "")
-        cls = _class_symbol(sym, src)
+        cls = _safe_class_name(cb.get("class_name", "")) or _class_symbol(sym, src)
         if not cls or cls in declared:
             continue
         declared.add(cls)
+        class_order.append(cls)
 
         lines.append(f"    class {cls} {{")
-        methods = cb.get("methods") or []
-        for m in methods[:5]:
-            short = _short_method(m)
-            if short:
-                lines.append(f"        +{short}()")
-        if not methods:
-            lines.append("        +...")
+        for method_name in _fallback_methods_for_mapping(cb):
+            if method_name == "...":
+                lines.append("        +...")
+            else:
+                lines.append(f"        +{method_name}()")
         lines.append("    }")
 
         bases = cb.get("base_classes") or []
@@ -178,6 +233,10 @@ def build_class_diagram(bundle: Dict[str, Any]) -> str:
                     lines.append(f"    class {bname}")
                     declared.add(bname)
                 lines.append(f"    {cls} --|> {bname}")
+
+    # Add lightweight module-internal usage links so the class diagram is not isolated boxes.
+    for i in range(len(class_order) - 1):
+        lines.append(f"    {class_order[i]} ..> {class_order[i + 1]} : uses")
 
     return "\n".join(lines) if len(lines) > 1 else ""
 

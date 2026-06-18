@@ -32,6 +32,9 @@ from .mdd_module_catalog import (
     load_module_catalog,
 )
 from .mdd_template import (
+    MDD_QUALITY_RULES,
+    MDD_SECTION_CONTRACT,
+    MDD_SECTIONS,
     PLAN_JSON_SCHEMA,
     markdown_table_cell,
     mdd_section_has_content,
@@ -130,7 +133,14 @@ def _diagram_context_block(bundle: Dict[str, Any]) -> str:
         parts.extend(["", "=== FLOWS ===", json.dumps(flows, indent=2, ensure_ascii=False)[:5000]])
     mapping = bundle.get("mapping") or {}
     cbs = mapping.get("codebase_mappings") or []
-    if cbs:
+    component_evidence = bundle.get("component_evidence") or []
+    if component_evidence:
+        parts.extend([
+            "",
+            "=== COMPONENT EVIDENCE ===",
+            json.dumps(component_evidence, indent=2, ensure_ascii=False)[:7000],
+        ])
+    elif cbs:
         parts.extend([
             "",
             "=== COMPONENT MAPPINGS ===",
@@ -168,16 +178,33 @@ def _resolve_diagram(
     hld_block: str = "",
     fallback_block: str = "",
 ) -> Tuple[str, str]:
-    """HLD-style pipeline: prefer validated HLD reuse, then LLM, then deterministic fallback."""
+    """HLD-style pipeline: prefer module-specific LLM, then HLD reuse, then fallback."""
     for source, block in (
-        ("hld", hld_block),
         ("llm", llm_block),
+        ("hld", hld_block),
         ("fallback", fallback_block),
     ):
         finalized = _finalize_diagram_block(block)
         if finalized:
             return finalized, source
     return "", "none"
+
+
+def _class_diagram_has_unexpected_classes(block: str, bundle: Dict[str, Any]) -> bool:
+    allowed = {
+        item.get("class_name", "")
+        for item in bundle.get("component_evidence") or []
+        if item.get("class_name")
+    }
+    for item in bundle.get("component_evidence") or []:
+        allowed.update(item.get("base_classes") or [])
+        allowed.update(item.get("implemented_interfaces") or [])
+    allowed.update({"ControllerBase", "WorkflowBase"})
+    allowed_lower = {a.lower() for a in allowed if a}
+    for cls in re.findall(r"^\s*class\s+([A-Za-z_]\w*)", block or "", re.MULTILINE):
+        if cls.lower() not in allowed_lower:
+            return True
+    return False
 
 
 def generate_mdd_diagrams(
@@ -201,17 +228,9 @@ def generate_mdd_diagrams(
     if include.get("module_architecture") and (
         bundle.get("primary_symbols") or bundle.get("target_projects") or has_components
     ):
-        prompt = "\n".join([
-            f"Generate a ```mermaid flowchart TD``` showing internal structure of module '{module}'.",
-            "Show mapped codebase classes as nodes with valid IDs and quoted labels.",
-            "Show dependencies on other modules with dashed edges.",
-            allowlist,
-            context,
-            "Output only the mermaid fenced block.",
-        ])
-        llm_block = _llm_diagram(llm, prompt, temperature=temperature)
+        # Flowcharts are deterministic by default to avoid unreadable long edge labels.
         block, source = _resolve_diagram(
-            llm_block=llm_block,
+            llm_block="",
             fallback_block=build_architecture_flowchart(bundle),
         )
         if block:
@@ -219,16 +238,9 @@ def generate_mdd_diagrams(
             sources["architecture"] = source
 
     if include.get("use_case_flow") and flows:
-        prompt = "\n".join([
-            f"Generate a ```mermaid flowchart TD``` for use-case flow(s) in module '{module}'.",
-            "Model each flow step as nodes; quote edge labels that contain parentheses.",
-            allowlist,
-            context,
-            "Output only the mermaid fenced block.",
-        ])
-        llm_block = _llm_diagram(llm, prompt, temperature=temperature)
+        # Use short numbered edges; full operation signatures are listed in the table below.
         block, source = _resolve_diagram(
-            llm_block=llm_block,
+            llm_block="",
             fallback_block=build_use_case_flowchart(bundle),
         )
         if block:
@@ -236,17 +248,9 @@ def generate_mdd_diagrams(
             sources["use_case"] = source
 
     if include.get("component_design") and has_components:
-        prompt = "\n".join([
-            f"Generate a ```mermaid classDiagram``` for module '{module}'.",
-            "Include mapped classes, up to 5 key methods each, and inheritance where known.",
-            "Do NOT create classes for method-only symbols (e.g. .GetFooduModuleInsight()).",
-            allowlist,
-            context,
-            "Output only the mermaid fenced block.",
-        ])
-        llm_block = _llm_diagram(llm, prompt, temperature=temperature)
+        # Deterministic class diagrams preserve valid class names and relationship links.
         block, source = _resolve_diagram(
-            llm_block=llm_block,
+            llm_block="",
             fallback_block=build_class_diagram(bundle),
         )
         if block:
@@ -279,13 +283,21 @@ def generate_mdd_diagrams(
 
 
 def _allowed_symbols_for_bundle(bundle: Dict[str, Any]) -> str:
-    symbols: List[str] = list(bundle.get("primary_symbols") or [])
+    symbols: List[str] = []
     mapping = bundle.get("mapping") or {}
 
     def _add(name: str) -> None:
         if name and name not in symbols:
             symbols.append(name)
 
+    for sym in bundle.get("primary_symbols") or []:
+        _add(sym)
+    for item in bundle.get("component_evidence") or []:
+        _add(item.get("normalized_symbol", ""))
+        _add(item.get("class_name", ""))
+        for rel in item.get("related_symbols") or []:
+            _add(rel.get("normalized_symbol", ""))
+            _add(rel.get("class_name", ""))
     for cb in mapping.get("codebase_mappings") or []:
         sym = cb.get("codebase_symbol", "")
         src = cb.get("source_file", "")
@@ -348,6 +360,105 @@ def _class_from_source_file(source_file: str) -> str:
     return name[:-3] if name.endswith(".cs") else name
 
 
+def _split_composite_symbol(symbol: str) -> List[str]:
+    """Split composite mapping labels while preserving simple symbols."""
+    if not symbol:
+        return []
+    parts = re.split(r"\s+\+\s+|\s*,\s*|\s*/\s*", symbol)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _normalize_code_symbol(symbol: str, source_file: str = "") -> Dict[str, str]:
+    """Return generic, MDD-safe symbol metadata for code_graph mappings."""
+    raw = (symbol or "").strip()
+    source_file = source_file or ""
+    source_class = _class_from_source_file(source_file)
+
+    if raw.startswith("."):
+        normalized = f"{source_class}{raw}" if source_class else raw.lstrip(".")
+        return {
+            "raw_symbol": raw,
+            "normalized_symbol": normalized,
+            "class_name": source_class,
+            "method_name": raw.lstrip(".").replace("()", ""),
+            "source_file": source_file,
+        }
+
+    class_name = resolve_class_name(raw, source_file) or source_class
+    method_name = ""
+    if "." in raw and not raw.startswith("."):
+        method_name = raw.split(".", 1)[1].replace("()", "")
+
+    return {
+        "raw_symbol": raw,
+        "normalized_symbol": raw,
+        "class_name": class_name or raw,
+        "method_name": method_name,
+        "source_file": source_file,
+    }
+
+
+def _normalize_mapping_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize one code_graph mapping entry without assuming a specific feature."""
+    raw_symbol = entry.get("codebase_symbol", "")
+    source_file = entry.get("source_file", "")
+    normalized = _normalize_code_symbol(raw_symbol, source_file)
+    if entry.get("normalized_symbol"):
+        normalized["normalized_symbol"] = entry.get("normalized_symbol", "")
+    if entry.get("class_name"):
+        normalized["class_name"] = entry.get("class_name", "")
+    if entry.get("method_name"):
+        normalized["method_name"] = entry.get("method_name", "")
+    related_symbols = []
+    for part in _split_composite_symbol(raw_symbol):
+        if part == raw_symbol:
+            continue
+        part_norm = _normalize_code_symbol(part, source_file)
+        related_symbols.append(part_norm)
+
+    methods = entry.get("method_impacts") or entry.get("methods") or []
+    method_impacts = []
+    for method in methods[:12]:
+        if isinstance(method, dict):
+            raw_method = method.get("method") or method.get("method_name") or method.get("display_name") or ""
+            display = method.get("method_name") or method.get("display_name") or raw_method
+        else:
+            raw_method = str(method)
+            display = raw_method
+        short = display.split("_")[-1] if "_" in display else display
+        method_impacts.append({
+            "method": raw_method,
+            "display_name": short.replace("()", ""),
+        })
+
+    return {
+        **normalized,
+        "base_classes": entry.get("base_classes") or [],
+        "implemented_interfaces": entry.get("implemented_interfaces") or [],
+        "methods": method_impacts,
+        "dtos": entry.get("dtos") or [],
+        "callers": entry.get("callers") or [],
+        "callees": entry.get("callees") or [],
+        "source_location": entry.get("source_location", ""),
+        "note": entry.get("note", ""),
+        "mapping_confidence": entry.get("mapping_confidence", ""),
+        "is_new_capability": bool(entry.get("is_new_capability")),
+        "related_symbols": related_symbols,
+    }
+
+
+def _build_component_evidence(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    evidence: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in mapping.get("codebase_mappings") or []:
+        normalized = _normalize_mapping_entry(entry)
+        key = normalized.get("normalized_symbol") or normalized.get("raw_symbol")
+        if key and key.lower() not in seen:
+            evidence.append(normalized)
+            seen.add(key.lower())
+    return evidence
+
+
 def _extract_hld_intro(hld_markdown: str) -> Dict[str, Any]:
     m = re.search(
         r"##\s+1\s+Introduction\s*\n(.*?)(?=\n##\s+2\s|\Z)",
@@ -392,13 +503,82 @@ def _diagram_mentions_module(diagram: str, symbols: List[str], module_name: str)
     return False
 
 
+def _keyword_tokens(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    stop = {
+        "module", "service", "controller", "workflow", "api", "data",
+        "user", "users", "details", "content", "class", "method",
+    }
+    for value in values:
+        if isinstance(value, dict):
+            value = " ".join(str(v) for v in value.values())
+        elif isinstance(value, list):
+            value = " ".join(str(v) for v in value)
+        text = str(value or "")
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", text):
+            low = token.lower()
+            if low not in stop:
+                tokens.add(low)
+    return tokens
+
+
+def _module_traceability_tokens(
+    module_name: str,
+    req_mod: Dict[str, Any],
+    component_evidence: List[Dict[str, Any]],
+    flows: List[Dict[str, Any]],
+) -> set[str]:
+    values: List[Any] = [
+        module_name,
+        req_mod.get("detailed_responsibility", ""),
+        req_mod.get("capabilities", []),
+        req_mod.get("interfaces_and_apis", []),
+    ]
+    for item in component_evidence:
+        values.extend([
+            item.get("raw_symbol", ""),
+            item.get("normalized_symbol", ""),
+            item.get("class_name", ""),
+            item.get("method_name", ""),
+            item.get("note", ""),
+        ])
+    for flow in flows:
+        for step in flow.get("step_by_step_sequence") or []:
+            if module_name.lower() in " ".join([
+                step.get("source_component", ""),
+                step.get("destination_component", ""),
+            ]).lower():
+                values.extend([
+                    step.get("source_component", ""),
+                    step.get("destination_component", ""),
+                    step.get("operation_signature", ""),
+                    step.get("payload_description", ""),
+                ])
+    return _keyword_tokens(*values)
+
+
 def _resolve_ac_symbol_for_module(
     ac: Dict[str, Any],
     seed_resolutions: List[Dict[str, Any]],
-    module_symbols: List[str],
-) -> str:
+    component_evidence: List[Dict[str, Any]],
+    module_tokens: set[str],
+) -> Tuple[str, int]:
     bls = ac.get("verifies", [])
-    mod_sym_set = {s.lower().replace(".", "") for s in module_symbols}
+    evidence_symbols = []
+    evidence_text = []
+    for item in component_evidence:
+        for key in ("raw_symbol", "normalized_symbol", "class_name", "method_name"):
+            if item.get(key):
+                evidence_symbols.append(item[key])
+        evidence_text.append(item.get("note", ""))
+
+    mod_sym_set = {
+        re.sub(r"[^a-z0-9]", "", s.lower())
+        for s in evidence_symbols
+        if s
+    }
+    ac_tokens = _keyword_tokens(ac.get("text", ""), ac.get("verifies", []))
+    score = len(ac_tokens & module_tokens)
     seed_by_bl: Dict[str, str] = {}
     for s in seed_resolutions:
         note = s.get("note", "")
@@ -411,14 +591,12 @@ def _resolve_ac_symbol_for_module(
     for bl in bls:
         if bl in seed_by_bl:
             sym = seed_by_bl[bl]
-            if any(part in sym.lower() for part in mod_sym_set if len(part) > 3):
-                return sym
-            if sym.startswith("."):
-                return sym
-            for ms in module_symbols:
-                if ms.lower() in sym.lower() or sym.lower() in ms.lower():
-                    return sym
-            return sym
+            sym_clean = re.sub(r"[^a-z0-9]", "", sym.lower())
+            if any(part and (part in sym_clean or sym_clean in part) for part in mod_sym_set):
+                return sym, score + 4
+            note_blob = " ".join(evidence_text).lower()
+            if sym.startswith(".") and sym.lower().replace(".", "").replace("()", "") in note_blob:
+                return sym, score + 3
 
     for s in seed_resolutions:
         note = s.get("note", "")
@@ -427,35 +605,32 @@ def _resolve_ac_symbol_for_module(
                 node = s.get("node") or {}
                 lbl = node.get("label", "")
                 if lbl:
-                    for ms in module_symbols:
-                        if ms.lower().replace(".", "") in lbl.lower().replace(".", ""):
-                            return lbl
-    return ""
+                    lbl_clean = re.sub(r"[^a-z0-9]", "", lbl.lower())
+                    if any(part and (part in lbl_clean or lbl_clean in part) for part in mod_sym_set):
+                        return lbl, score + 3
+    return "", score
 
 
 def _filter_acs_for_module(
     acceptance_criteria: List[Dict[str, Any]],
     seed_resolutions: List[Dict[str, Any]],
-    module_symbols: List[str],
+    module_name: str,
+    req_mod: Dict[str, Any],
+    component_evidence: List[Dict[str, Any]],
+    flows: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     filtered = []
+    module_tokens = _module_traceability_tokens(
+        module_name, req_mod, component_evidence, flows,
+    )
     for ac in acceptance_criteria:
-        sym = _resolve_ac_symbol_for_module(ac, seed_resolutions, module_symbols)
-        if sym:
-            filtered.append({**ac, "_mapped_symbol": sym})
-        else:
-            bl_text = " ".join(ac.get("verifies", []))
-            for s in seed_resolutions:
-                note = s.get("note", "")
-                if any(bl in note for bl in ac.get("verifies", [])):
-                    node = s.get("node") or {}
-                    lbl = node.get("label", "")
-                    if lbl and any(
-                        lbl.lower().replace(".", "") in ms.lower().replace(".", "")
-                        for ms in module_symbols
-                    ):
-                        filtered.append({**ac, "_mapped_symbol": lbl})
-                        break
+        sym, score = _resolve_ac_symbol_for_module(
+            ac, seed_resolutions, component_evidence, module_tokens,
+        )
+        if sym and score >= 2:
+            filtered.append({**ac, "_mapped_symbol": sym, "_module_score": score})
+        elif not sym and score >= 5:
+            filtered.append({**ac, "_mapped_symbol": "", "_module_score": score})
     return filtered
 
 
@@ -472,6 +647,16 @@ def build_module_bundle(
     mapped_modules = code_graph.get("mapping", {}).get("mapped_modules", [])
     mapping = _find_mapping_for_module(logical_name, mapped_modules)
     symbols = _symbols_from_mapping(mapping)
+    component_evidence = _build_component_evidence(mapping or {})
+    normalized_symbols = []
+    for item in component_evidence:
+        for value in (
+            item.get("normalized_symbol"),
+            item.get("class_name"),
+            item.get("raw_symbol"),
+        ):
+            if value and value not in normalized_symbols:
+                normalized_symbols.append(value)
     all_target = code_graph.get("target_projects", [])
     target_projects = _target_projects_from_mapping(mapping, all_target)
     all_flows = requirements.get("hld_content", {}).get("2_logical_view", {}).get(
@@ -482,7 +667,14 @@ def build_module_bundle(
     intro = requirements.get("hld_content", {}).get("1_introduction", {})
     seed_resolutions = code_graph.get("seed_resolutions", [])
     acceptance_criteria = code_graph.get("acceptance_criteria", [])
-    filtered_acs = _filter_acs_for_module(acceptance_criteria, seed_resolutions, symbols)
+    filtered_acs = _filter_acs_for_module(
+        acceptance_criteria,
+        seed_resolutions,
+        logical_name,
+        req_mod or {},
+        component_evidence,
+        filtered_flows,
+    )
 
     dependencies_in: List[Dict[str, str]] = []
     dependencies_out: List[Dict[str, str]] = []
@@ -534,8 +726,10 @@ def build_module_bundle(
         "ticket": code_graph.get("contract", {}).get("ticket"),
         "requirements_module": req_mod or {},
         "mapping": mapping or {},
+        "component_evidence": component_evidence,
         "target_projects": target_projects,
-        "primary_symbols": symbols,
+        "primary_symbols": normalized_symbols or symbols,
+        "raw_symbols": symbols,
         "filtered_flows": filtered_flows,
         "hld_excerpt": hld_excerpt,
         "hld_intro": intro,
@@ -548,26 +742,31 @@ def build_module_bundle(
     return bundle
 
 
-def _render_component_table(mapping: Dict[str, Any]) -> str:
+def _render_component_table(bundle: Dict[str, Any]) -> str:
+    evidence = bundle.get("component_evidence") or []
+    if not evidence:
+        evidence = [
+            _normalize_mapping_entry(entry)
+            for entry in (bundle.get("mapping") or {}).get("codebase_mappings") or []
+        ]
+    if not evidence:
+        return ""
     lines = [
-        "| Symbol | Source File | Base Classes | Key Methods |",
-        "| --- | --- | --- | --- |",
+        "| Symbol | Class | Source File | Base Classes | Existing Methods / Impact Candidates | DTOs | Notes |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for cb in mapping.get("codebase_mappings") or []:
-        sym = cb.get("codebase_symbol", "")
-        src = cb.get("source_file", "") or "external"
-        bases = ", ".join(cb.get("base_classes") or []) or "—"
-        methods = cb.get("methods") or []
-        method_labels = []
-        for m in methods[:6]:
-            short = m.split("_")[-1] if "_" in m else m
-            method_labels.append(short)
+    for item in evidence:
+        sym = item.get("normalized_symbol") or item.get("raw_symbol", "")
+        cls = item.get("class_name") or "—"
+        src = item.get("source_file") or "external"
+        bases = ", ".join(item.get("base_classes") or []) or "—"
+        methods = item.get("methods") or []
+        method_labels = [m.get("display_name", "") for m in methods[:6] if m.get("display_name")]
         methods_str = ", ".join(method_labels) or "—"
-        if sym.startswith("."):
-            cls = _class_from_source_file(src)
-            sym = f"{cls}{sym}" if cls else sym
+        dtos = ", ".join(item.get("dtos") or []) or "—"
+        note = markdown_table_cell(item.get("note", ""))[:150] or "—"
         lines.append(
-            f"| `{sym}` | `{src}` | {bases} | {methods_str} |"
+            f"| `{sym}` | `{cls}` | `{src}` | {bases} | {methods_str} | {dtos} | {note} |"
         )
     return "\n".join(lines)
 
@@ -583,10 +782,9 @@ def _render_api_table(mapping: Dict[str, Any]) -> str:
     for api in apis:
         mappings = api.get("codebase_mappings") or []
         sym = mappings[0].get("codebase_symbol", "—") if mappings else "—"
-        if sym.startswith("."):
-            src = mappings[0].get("source_file", "") if mappings else ""
-            cls = _class_from_source_file(src)
-            sym = f"{cls}{sym}" if cls else sym
+        if mappings:
+            src = mappings[0].get("source_file", "")
+            sym = _normalize_code_symbol(sym, src).get("normalized_symbol", sym)
         lines.append(
             f"| {api.get('interface_name', '—')} | {api.get('protocol_or_type', '—')} "
             f"| `{api.get('signature', '—')}` | `{sym}` |"
@@ -627,7 +825,11 @@ def _render_use_case_flow(flows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _render_section_2(bundle: Dict[str, Any], architecture_diagram: str = "") -> str:
+def _render_section_2(
+    bundle: Dict[str, Any],
+    architecture_diagram: str = "",
+    section_body: str = "",
+) -> str:
     mod = bundle.get("requirements_module") or {}
     lines = [
         "## 2 Module Architecture Overview",
@@ -637,11 +839,11 @@ def _render_section_2(bundle: Dict[str, Any], architecture_diagram: str = "") ->
         f"**Module:** {bundle.get('logical_name', '')}",
         "",
     ]
+    if section_body:
+        lines.append(section_body)
+        lines.append("")
     if mod.get("architectural_layer"):
         lines.append(f"**Architectural Layer:** {mod['architectural_layer']}")
-        lines.append("")
-    if mod.get("detailed_responsibility"):
-        lines.append(mod["detailed_responsibility"])
         lines.append("")
     if bundle.get("target_projects"):
         lines.append("**Related Target Projects (C#):**")
@@ -659,11 +861,6 @@ def _render_section_2(bundle: Dict[str, Any], architecture_diagram: str = "") ->
         for d in bundle["architecture_decisions"]:
             lines.append(f"- {d}")
         lines.append("")
-    if bundle.get("hld_excerpt"):
-        lines.append("**HLD Logical View excerpt:**")
-        lines.append("")
-        lines.append(bundle["hld_excerpt"][:4000])
-        lines.append("")
     if architecture_diagram:
         lines.append("**Module structure diagram:**")
         lines.append("")
@@ -672,11 +869,16 @@ def _render_section_2(bundle: Dict[str, Any], architecture_diagram: str = "") ->
     return "\n".join(lines)
 
 
-def _render_section_4(bundle: Dict[str, Any]) -> str:
+def _render_section_4(bundle: Dict[str, Any], section_body: str = "") -> str:
     mapping = bundle.get("mapping") or {}
     lines = ["## 4 Component and Class Design", ""]
-    table = _render_component_table(mapping)
+    if section_body:
+        lines.append(section_body)
+        lines.append("")
+    table = _render_component_table(bundle)
     if table:
+        lines.append("### Component Evidence")
+        lines.append("")
         lines.append(table)
         lines.append("")
     api_table = _render_api_table(mapping)
@@ -688,12 +890,15 @@ def _render_section_4(bundle: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_section_6(bundle: Dict[str, Any]) -> str:
+def _render_section_6(bundle: Dict[str, Any], section_body: str = "") -> str:
     deps_in = bundle.get("dependencies_in") or []
     deps_out = bundle.get("dependencies_out") or []
-    if not deps_in and not deps_out:
+    if not deps_in and not deps_out and not section_body:
         return ""
     lines = ["## 6 External System/Module Interface Design", ""]
+    if section_body:
+        lines.append(section_body)
+        lines.append("")
     if deps_in:
         lines.extend([
             "### 6.1 Input received from external Systems and Modules",
@@ -723,6 +928,79 @@ def _render_section_6(bundle: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _expected_sop_headings(include: Dict[str, Any]) -> List[str]:
+    headings: List[str] = []
+    for section in MDD_SECTIONS:
+        if include.get(section["key"]):
+            headings.append(f"## {section['number']} {section['title']}")
+        for sub in section.get("subsections", []):
+            if include.get(sub["key"]):
+                headings.append(f"### {sub['number']} {sub['title']}")
+    return headings
+
+
+def build_mdd_quality_report(
+    doc: str,
+    bundle: Dict[str, Any],
+    plan: Dict[str, Any],
+    diagram_report: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Non-blocking MDD quality gate report for manifest/plan consumers."""
+    include = plan.get("include_sections", {})
+    expected = _expected_sop_headings(include)
+    missing = [h for h in expected if h not in doc]
+    warnings: List[str] = []
+
+    if "HLD Logical View excerpt" in doc:
+        warnings.append("raw_hld_excerpt_present")
+    if re.search(r"class\s+\.[A-Za-z_]", doc):
+        warnings.append("invalid_dot_prefixed_class_present")
+    if re.search(r"\bclass\s+\w+\s*\+\s*\w+", doc):
+        warnings.append("composite_symbol_used_as_class")
+    if re.search(r"\b(Redis|Kafka|AWS|OIDC|Kubernetes)\b", doc, re.IGNORECASE):
+        warnings.append("potential_unsourced_infrastructure_reference")
+    if include.get("component_design") and not bundle.get("component_evidence"):
+        warnings.append("component_design_without_component_evidence")
+    if include.get("traceability") and not bundle.get("filtered_acs"):
+        warnings.append("traceability_enabled_without_module_acs")
+    if diagram_report.get("invalid", 0):
+        warnings.append("invalid_mermaid_diagrams")
+
+    allowed_classes = {
+        item.get("class_name", "")
+        for item in bundle.get("component_evidence") or []
+        if item.get("class_name")
+    }
+    for item in bundle.get("component_evidence") or []:
+        allowed_classes.update(item.get("base_classes") or [])
+        allowed_classes.update(item.get("implemented_interfaces") or [])
+    allowed_classes.update({"ControllerBase", "WorkflowBase"})
+    declared_classes = set(re.findall(r"^\s*class\s+([A-Za-z_]\w*)", doc, re.MULTILINE))
+    unexpected_classes = sorted(
+        c for c in declared_classes
+        if c not in allowed_classes and c.lower() not in {a.lower() for a in allowed_classes}
+    )
+    if unexpected_classes:
+        warnings.append(f"unexpected_class_diagram_classes:{','.join(unexpected_classes)}")
+
+    llm_sections = plan.get("llm_sections_generated", [])
+    if include.get("component_design") and "component_design" not in llm_sections:
+        warnings.append("component_design_llm_body_missing")
+    if include.get("architecture_overview") and "architecture_overview" not in llm_sections:
+        warnings.append("architecture_overview_llm_body_missing")
+
+    return {
+        "valid": not missing and not warnings and diagram_report.get("invalid", 0) == 0,
+        "missing_sop_headings": missing,
+        "warnings": warnings,
+        "diagram_report": diagram_report,
+        "llm_sections_generated": llm_sections,
+        "component_evidence_count": len(bundle.get("component_evidence") or []),
+        "traceability_count": len(bundle.get("filtered_acs") or []),
+        "quality_rules": MDD_QUALITY_RULES,
+    }
+
+
 def _planner_prompt(bundle: Dict[str, Any]) -> str:
     return "\n".join([
         f"Plan MDD sections for module '{bundle.get('logical_name', '')}'.",
@@ -744,6 +1022,113 @@ def _planner_prompt(bundle: Dict[str, Any]) -> str:
         "",
         "Return JSON only.",
     ])
+
+
+def _section_context_payload(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact, generic evidence for MDD section generation."""
+    return {
+        "module": {
+            "logical_name": bundle.get("logical_name"),
+            "target_projects": bundle.get("target_projects"),
+            "requirements_module": bundle.get("requirements_module"),
+            "architecture_decisions": bundle.get("architecture_decisions"),
+        },
+        "component_evidence": bundle.get("component_evidence") or [],
+        "interfaces_and_apis": (bundle.get("mapping") or {}).get("interfaces_and_apis") or [],
+        "flows": bundle.get("filtered_flows") or [],
+        "dependencies_in": bundle.get("dependencies_in") or [],
+        "dependencies_out": bundle.get("dependencies_out") or [],
+        "module_relevant_acceptance_criteria": bundle.get("filtered_acs") or [],
+        "hld_logical_view_context": (bundle.get("hld_excerpt") or "")[:3000],
+    }
+
+
+def _strip_section_heading(markdown: str) -> str:
+    """Keep SOP headings deterministic by removing headings from LLM bodies."""
+    markdown = re.sub(r"```mermaid\s*\n.*?```", "", markdown or "", flags=re.DOTALL)
+    lines = []
+    for line in markdown.strip().splitlines():
+        if re.match(r"^\s*#{1,6}\s+", line):
+            continue
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
+
+
+def _compact_section_body(markdown: str, *, max_chars: int = 1800) -> str:
+    """Keep generated MDD prose readable; evidence tables carry the detail."""
+    text = (markdown or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rsplit("\n\n", 1)[0].strip()
+    return cut or text[:max_chars].strip()
+
+
+def _llm_section_body(
+    llm,
+    section_key: str,
+    bundle: Dict[str, Any],
+    *,
+    temperature: float = 0.2,
+    max_tokens: int = 900,
+) -> str:
+    """Generate only the body under a fixed SOP-036 section heading."""
+    contract = MDD_SECTION_CONTRACT.get(section_key, {})
+    must_cover = contract.get("must_cover", [])
+    prompt = "\n".join([
+        f"Generate the body content for SOP-036 MDD section: {contract.get('heading', section_key)}.",
+        f"Module: {bundle.get('logical_name', '')}",
+        "Return markdown BODY ONLY. Do not include any heading line.",
+        "Do not include Mermaid diagrams or fenced code blocks in this prose body.",
+        "Keep it concise: 2-4 short paragraphs or 4-7 bullets maximum.",
+        "Do not repeat content that will be obvious from evidence tables.",
+        "Ground every claim in the provided evidence. Do not invent code, DTOs, APIs, infra, or storage.",
+        "If a required detail is not present, write 'To be confirmed' for that detail.",
+        "Do not paste raw HLD excerpts. Use the HLD context only to derive MDD-level design statements.",
+        "Keep content concise but implementation-level.",
+        "",
+        "MUST COVER:",
+        json.dumps(must_cover, indent=2, ensure_ascii=False),
+        "",
+        "QUALITY RULES:",
+        json.dumps(MDD_QUALITY_RULES, indent=2, ensure_ascii=False),
+        "",
+        "=== EVIDENCE ===",
+        json.dumps(_section_context_payload(bundle), indent=2, ensure_ascii=False)[:12000],
+    ])
+    try:
+        raw = llm.chat(
+            system_prompt=_MDD_SYSTEM,
+            user_prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return _compact_section_body(_strip_section_heading(raw))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _generate_section_bodies(
+    llm,
+    bundle: Dict[str, Any],
+    include: Dict[str, Any],
+    *,
+    temperature: float = 0.2,
+) -> Dict[str, str]:
+    """Generate MDD prose for applicable SOP sections while headings stay fixed."""
+    bodies: Dict[str, str] = {}
+    for key in (
+        "purpose_and_scope",
+        "architecture_overview",
+        "use_case_flow",
+        "component_design",
+        "sequence_overview",
+        "external_interfaces",
+    ):
+        if include.get(key):
+            body = _llm_section_body(llm, key, bundle, temperature=temperature)
+            if body:
+                bodies[key] = body
+    return bodies
 
 
 def _llm_narrative_prompt(section: str, bundle: Dict[str, Any]) -> str:
@@ -781,8 +1166,12 @@ def _build_mdd_document(
     diagrams, diagram_sources = generate_mdd_diagrams(
         llm, bundle, include, temperature=temperature,
     )
+    section_bodies = _generate_section_bodies(
+        llm, bundle, include, temperature=temperature,
+    )
     plan["diagrams_generated"] = list(diagrams.keys())
     plan["diagram_sources"] = diagram_sources
+    plan["llm_sections_generated"] = list(section_bodies.keys())
 
     cover = [
         f"# {project} — Module Detail Design",
@@ -824,10 +1213,12 @@ def _build_mdd_document(
             intro_parts.append("### 1.1 Purpose and Scope")
             intro_parts.append("")
             mod = bundle.get("requirements_module") or {}
-            if mod.get("detailed_responsibility"):
+            if section_bodies.get("purpose_and_scope"):
+                intro_parts.append(section_bodies["purpose_and_scope"])
+            elif mod.get("detailed_responsibility"):
                 intro_parts.append(mod["detailed_responsibility"])
-            elif bundle.get("hld_excerpt"):
-                intro_parts.append(bundle["hld_excerpt"][:1500])
+            else:
+                intro_parts.append("To be confirmed.")
             intro_parts.append("")
         if include.get("definitions"):
             intro_parts.append("### 1.2 Definitions and Acronyms")
@@ -908,13 +1299,22 @@ def _build_mdd_document(
         sections.append("\n".join(intro_parts))
 
     if include.get("module_architecture"):
-        sections.append(_render_section_2(bundle, diagrams.get("architecture", "")))
+        sections.append(_render_section_2(
+            bundle,
+            diagrams.get("architecture", ""),
+            section_bodies.get("architecture_overview", ""),
+        ))
 
     if include.get("use_case_flow"):
         flow_md = _render_use_case_flow(bundle.get("filtered_flows", []))
-        if flow_md or diagrams.get("use_case"):
+        if flow_md or diagrams.get("use_case") or section_bodies.get("use_case_flow"):
             uc_parts = ["## 3 Use Case Flow", ""]
+            if section_bodies.get("use_case_flow"):
+                uc_parts.append(section_bodies["use_case_flow"])
+                uc_parts.append("")
             if flow_md:
+                uc_parts.append("#### Source Flow Steps")
+                uc_parts.append("")
                 uc_parts.append(flow_md)
             if diagrams.get("use_case"):
                 uc_parts.append("#### Use case flow diagram")
@@ -924,13 +1324,16 @@ def _build_mdd_document(
             sections.append("\n".join(uc_parts))
 
     if include.get("component_design"):
-        sec4 = _render_section_4(bundle)
+        sec4 = _render_section_4(bundle, section_bodies.get("component_design", ""))
         if diagrams.get("class"):
             sec4 += "\n### Component class diagram\n\n" + _mermaid_fence(diagrams["class"]) + "\n"
         sections.append(sec4)
 
     if include.get("sequence_flow"):
         seq_parts = ["## 5 Sequence Flow", "", "### 5.1 Sequence Overview", ""]
+        if section_bodies.get("sequence_overview"):
+            seq_parts.append(section_bodies["sequence_overview"])
+            seq_parts.append("")
         if diagrams.get("sequence"):
             source = diagram_sources.get("sequence", "llm")
             source_label = {
@@ -947,7 +1350,7 @@ def _build_mdd_document(
         sections.append("\n".join(seq_parts))
 
     if include.get("external_interfaces"):
-        ext = _render_section_6(bundle)
+        ext = _render_section_6(bundle, section_bodies.get("external_interfaces", ""))
         if ext:
             sections.append(ext)
 
@@ -1029,6 +1432,9 @@ def generate_mdd_for_modules(
         mdd_raw = _build_mdd_document(bundle, plan, llm, temperature=temperature)
         mdd_clean = postprocess_mermaid(mdd_raw)
         diagram_report = validate_diagrams(mdd_clean)
+        quality_report = build_mdd_quality_report(
+            mdd_clean, bundle, plan, diagram_report,
+        )
 
         if not plan.get("diagrams_generated"):
             print(
@@ -1044,7 +1450,16 @@ def generate_mdd_for_modules(
         slug = slugify_module_name(logical_name)
         plan_path = os.path.join(mdd_dir, f"mdd_plan_{slug}.json")
         with open(plan_path, "w", encoding="utf-8") as fh:
-            json.dump({**plan, "diagram_report": diagram_report}, fh, indent=2, ensure_ascii=False)
+            json.dump(
+                {
+                    **plan,
+                    "diagram_report": diagram_report,
+                    "mdd_quality_report": quality_report,
+                },
+                fh,
+                indent=2,
+                ensure_ascii=False,
+            )
 
         out_name = f"MDD_{slug}_{resolved_ticket}.md"
         out_path = os.path.join(mdd_dir, out_name)
@@ -1055,7 +1470,11 @@ def generate_mdd_for_modules(
             module_name=logical_name,
             slug=slug,
             artifact_path=out_path,
-            plan={**plan, "diagram_report": diagram_report},
+            plan={
+                **plan,
+                "diagram_report": diagram_report,
+                "mdd_quality_report": quality_report,
+            },
             sections_included=plan.get("sections_included", []),
             sections_skipped=plan.get("sections_skipped", []),
         ))
@@ -1080,6 +1499,8 @@ def generate_mdd_for_modules(
                 "diagrams_generated": r.plan.get("diagrams_generated", []),
                 "diagram_sources": r.plan.get("diagram_sources", {}),
                 "diagram_report": r.plan.get("diagram_report", {}),
+                "llm_sections_generated": r.plan.get("llm_sections_generated", []),
+                "mdd_quality_report": r.plan.get("mdd_quality_report", {}),
             }
             for r in generated
         ],
