@@ -13,12 +13,15 @@ from typing import Any, Dict, List, Optional
 
 MDD_SECTIONS = [
     {"key": "introduction", "number": "1", "title": "Introduction", "subsections": [
-        {"key": "purpose_and_scope", "number": "1.1", "title": "Purpose and Scope"},
-        {"key": "definitions", "number": "1.2", "title": "Definitions and Acronyms"},
-        {"key": "references", "number": "1.3", "title": "References"},
+        {"key": "purpose", "number": "1.1", "title": "Purpose"},
+        {"key": "target_audience", "number": "1.2", "title": "Target Audience"},
+        {"key": "scope", "number": "1.3", "title": "Scope"},
+        {"key": "definitions", "number": "1.4", "title": "Definitions and Acronyms"},
+        {"key": "conventions", "number": "1.5", "title": "Conventions and Standards Followed"},
     ]},
     {"key": "module_architecture", "number": "2", "title": "Module Architecture Overview", "subsections": [
         {"key": "architecture_overview", "number": "2.1", "title": "Architecture Overview"},
+        {"key": "assumptions_design_decisions", "number": "2.2", "title": "Assumptions and Design Decisions Made"},
     ]},
     {"key": "use_case_flow", "number": "3", "title": "Use Case Flow", "subsections": []},
     {"key": "component_design", "number": "4", "title": "Component and Class Design", "subsections": []},
@@ -29,28 +32,43 @@ MDD_SECTIONS = [
         {"key": "inputs", "number": "6.1", "title": "Input received from external Systems and Modules"},
         {"key": "outputs", "number": "6.2", "title": "Output given to external Systems and Modules"},
     ]},
-    {"key": "annexure", "number": "7", "title": "Annexure", "subsections": [
-        {"key": "traceability", "number": "7.1", "title": "Requirements Traceability Matrix"},
+    {"key": "data_model_design", "number": "7", "title": "Data Model Design", "subsections": []},
+    {"key": "annexure", "number": "8", "title": "Annexure", "subsections": [
+        {"key": "traceability", "number": "8.1", "title": "Requirements Traceability Matrix"},
     ]},
 ]
 
 MDD_SECTION_CONTRACT = {
-    "purpose_and_scope": {
-        "heading": "### 1.1 Purpose and Scope",
+    "purpose": {
+        "heading": "### 1.1 Purpose",
         "must_cover": [
             "module purpose",
+            "source requirements and mapped module context",
+            "business or system capability supported by the module",
+        ],
+    },
+    "scope": {
+        "heading": "### 1.3 Scope",
+        "must_cover": [
             "in-scope responsibilities",
             "out-of-scope responsibilities or missing scope called out as To be confirmed",
             "source requirements and mapped module context",
         ],
     },
+    "target_audience": {
+        "heading": "### 1.2 Target Audience",
+        "must_cover": ["intended technical reviewers and implementation teams"],
+    },
     "definitions": {
-        "heading": "### 1.2 Definitions and Acronyms",
+        "heading": "### 1.4 Definitions and Acronyms",
         "must_cover": ["terms and acronyms present in source documentation"],
     },
-    "references": {
-        "heading": "### 1.3 References",
-        "must_cover": ["source documents and relationship to this module"],
+    "conventions": {
+        "heading": "### 1.5 Conventions and Standards Followed",
+        "must_cover": [
+            "naming, traceability, and documentation conventions used in this generated MDD",
+            "standards inferred from source artifacts",
+        ],
     },
     "architecture_overview": {
         "heading": "### 2.1 Architecture Overview",
@@ -60,6 +78,14 @@ MDD_SECTION_CONTRACT = {
             "existing components touched",
             "new or modified behavior required by the feature",
             "dependencies and HLD design decisions",
+        ],
+    },
+    "assumptions_design_decisions": {
+        "heading": "### 2.2 Assumptions and Design Decisions Made",
+        "must_cover": [
+            "HLD design decisions relevant to the module",
+            "assumptions caused by missing implementation evidence",
+            "explicit To be confirmed statements for unknown details",
         ],
     },
     "use_case_flow": {
@@ -101,8 +127,16 @@ MDD_SECTION_CONTRACT = {
             "validation, error, and missing-data behavior when available",
         ],
     },
+    "data_model_design": {
+        "heading": "## 7 Data Model Design",
+        "must_cover": [
+            "DTOs, entities, request/response payloads, and contracts available from code graph evidence",
+            "source files and mapped symbols for each data model",
+            "To be confirmed when model structure is unavailable",
+        ],
+    },
     "traceability": {
-        "heading": "### 7.1 Requirements Traceability Matrix",
+        "heading": "### 8.1 Requirements Traceability Matrix",
         "must_cover": [
             "module-relevant AC/BL mappings only",
             "mapped code symbol or Not mapped in code graph",
@@ -117,6 +151,7 @@ MDD_QUALITY_RULES = [
     "Use normalized code symbols from code_graph.mapping only.",
     "Use 'To be confirmed' for implementation detail not present in source artifacts.",
     "Keep traceability scoped to the selected module.",
+    "Keep factual tables and diagrams grounded in requirements, HLD, contract, and code_graph evidence.",
     "Every Mermaid block must pass structural validation.",
 ]
 
@@ -125,11 +160,14 @@ PLAN_JSON_SCHEMA = """
   "module_name": "<string>",
   "include_sections": {
     "introduction": true,
-    "purpose_and_scope": true,
+    "purpose": true,
+    "target_audience": true,
+    "scope": true,
     "definitions": true,
-    "references": true,
+    "conventions": true,
     "module_architecture": true,
     "architecture_overview": true,
+    "assumptions_design_decisions": true,
     "use_case_flow": true,
     "component_design": true,
     "sequence_flow": true,
@@ -137,6 +175,7 @@ PLAN_JSON_SCHEMA = """
     "external_interfaces": true,
     "inputs": true,
     "outputs": true,
+    "data_model_design": true,
     "annexure": true,
     "traceability": true
   },
@@ -176,41 +215,47 @@ def mdd_section_has_content(section_key: str, bundle: Dict[str, Any]) -> bool:
     if section_key == "module_architecture":
         return mdd_section_has_content("architecture_overview", bundle)
 
-    if section_key == "purpose_and_scope":
+    if section_key == "purpose":
         mod = bundle.get("requirements_module") or {}
         return _has_text(mod.get("detailed_responsibility")) or _has_text(bundle.get("hld_excerpt"))
+
+    if section_key == "scope":
+        mod = bundle.get("requirements_module") or {}
+        return _has_text(mod.get("detailed_responsibility")) or _has_text(mod.get("capabilities"))
+
+    if section_key == "target_audience":
+        return True
 
     if section_key == "definitions":
         intro = bundle.get("hld_intro") or {}
         defs = intro.get("1_2_definitions_and_acronyms") or intro.get("definitions_and_acronyms") or {}
+        defs = intro.get("1_4_definitions_and_acronyms") or defs
         if isinstance(defs, dict):
             return _has_text(defs.get("terms")) or _has_text(defs)
         # `defs` is often already a list of {term, expansion, definition}
         return _has_text(defs)
 
-    if section_key == "references":
-        intro = bundle.get("hld_intro") or {}
-        refs = intro.get("1_3_references") or intro.get("references") or {}
-        if isinstance(refs, dict):
-            return _has_text(refs.get("documents")) or _has_text(refs)
-        # `refs` is often already a list of {title, url_or_location, relationship_description}
-        return _has_text(refs)
+    if section_key == "conventions":
+        return True
+
+    if section_key == "assumptions_design_decisions":
+        return bool(bundle.get("assumptions_and_decisions") or bundle.get("architecture_decisions"))
 
     if section_key == "introduction":
         return any(
             mdd_section_has_content(k, bundle)
-            for k in ("purpose_and_scope", "definitions", "references")
+            for k in ("purpose", "target_audience", "scope", "definitions", "conventions")
         )
 
     if section_key == "use_case_flow":
-        return bool(bundle.get("filtered_flows"))
+        return bool(bundle.get("use_cases") or bundle.get("filtered_flows"))
 
     if section_key == "component_design":
         mapping = bundle.get("mapping") or {}
         return bool(mapping.get("codebase_mappings"))
 
     if section_key == "sequence_overview":
-        return bool(bundle.get("filtered_flows") or bundle.get("sequence_diagrams"))
+        return bool(bundle.get("sequence_flows") or bundle.get("filtered_flows") or bundle.get("sequence_diagrams"))
 
     if section_key == "sequence_flow":
         return mdd_section_has_content("sequence_overview", bundle)
@@ -223,6 +268,9 @@ def mdd_section_has_content(section_key: str, bundle: Dict[str, Any]) -> bool:
 
     if section_key == "external_interfaces":
         return mdd_section_has_content("inputs", bundle) or mdd_section_has_content("outputs", bundle)
+
+    if section_key == "data_model_design":
+        return bool(bundle.get("data_models"))
 
     if section_key == "traceability":
         return bool(bundle.get("filtered_acs"))
@@ -247,11 +295,12 @@ def normalize_mdd_plan(plan: Dict[str, Any], bundle: Dict[str, Any]) -> Dict[str
     include = plan.setdefault("include_sections", {})
 
     section_keys = [
-        "purpose_and_scope", "definitions", "references", "introduction",
-        "architecture_overview", "module_architecture",
+        "purpose", "target_audience", "scope", "definitions", "conventions", "introduction",
+        "architecture_overview", "assumptions_design_decisions", "module_architecture",
         "use_case_flow", "component_design",
         "sequence_overview", "sequence_flow",
         "inputs", "outputs", "external_interfaces",
+        "data_model_design",
         "traceability", "annexure",
     ]
     for key in section_keys:

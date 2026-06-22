@@ -1,6 +1,6 @@
 """Pydantic models for API request/response"""
 
-from pydantic import BaseModel, Field, field_validator, HttpUrl
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict
 from datetime import datetime
 import re
@@ -82,20 +82,29 @@ class ChatResponse(BaseModel):
 # Ingestion Models
 class IngestionRequest(BaseModel):
     confluence_url: str = Field(..., min_length=10, max_length=500)
+    confluence_page_url: Optional[str] = Field(
+        None,
+        min_length=10,
+        max_length=1000,
+        description="Optional full Confluence page URL; page_id is extracted when possible",
+    )
     username: str = Field(..., min_length=3, max_length=200)
     api_token: str = Field(..., min_length=10, max_length=500)
     space_key: Optional[str] = Field(None, max_length=100)
     page_id: Optional[str] = Field(None, max_length=100)
     product: Optional[str] = Field(None, max_length=100, description="Product identifier (e.g., 'cvs', 'lillyhealth', 'welldoc')")
+    release: Optional[str] = Field(None, max_length=100, description="Release identifier (e.g., '3.0_release')")
     chunk_size: int = Field(default=1500, ge=500, le=3000)
     chunk_overlap: int = Field(default=200, ge=0, le=500)
     clear_existing: bool = False
     clear_product_only: bool = Field(default=True, description="When clear_existing is True, only clear data for the specified product")
     
-    @field_validator('confluence_url')
+    @field_validator('confluence_url', 'confluence_page_url')
     @classmethod
-    def validate_confluence_url(cls, v: str) -> str:
+    def validate_confluence_url(cls, v: Optional[str]) -> Optional[str]:
         """Validate Confluence URL format"""
+        if v is None:
+            return v
         v = v.strip().rstrip('/')
         # Check if it's a valid URL
         if not re.match(r'^https?://', v):
@@ -168,6 +177,17 @@ class IngestionRequest(BaseModel):
             raise ValueError('Invalid product format (use lowercase alphanumeric, hyphens, underscores)')
         return v
 
+    @field_validator('release')
+    @classmethod
+    def validate_release_ingestion(cls, v: Optional[str]) -> Optional[str]:
+        """Validate and sanitize release identifier"""
+        if v is None:
+            return v
+        v = v.strip().replace(" ", "_")
+        if not re.match(r'^[a-zA-Z0-9_.\-]+$', v):
+            raise ValueError('Invalid release format (use alphanumeric, dots, hyphens, underscores)')
+        return v
+
 
 class IngestionStatus(BaseModel):
     job_id: str
@@ -176,6 +196,8 @@ class IngestionStatus(BaseModel):
     pages_processed: int
     chunks_created: int
     product: Optional[str] = None  # Product being ingested
+    release: Optional[str] = None
+    artifact_root: Optional[str] = None
     current_page: Optional[str] = None
     message: Optional[str] = None
     error: Optional[str] = None
@@ -252,6 +274,8 @@ class RequirementsGenerationRequest(BaseModel):
     """Trigger requirements extraction from the already-ingested Confluence corpus."""
     product: Optional[str] = Field(None, max_length=100,
                                    description="Optional product filter (matches ingestion product)")
+    release: Optional[str] = Field(None, max_length=100,
+                                  description="Release identifier to read/write artifacts")
     n_results: int = Field(default=12, ge=1, le=30,
                            description="Top-K chunks per probe query")
 
@@ -259,7 +283,9 @@ class RequirementsGenerationRequest(BaseModel):
 class RequirementsGenerationResponse(BaseModel):
     job_id: str
     product: Optional[str] = None
+    release: Optional[str] = None
     artifact_path: str
+    artifact_paths: Dict = Field(default_factory=dict)
     started_at: str
     completed_at: str
     requirements: Dict
@@ -267,6 +293,8 @@ class RequirementsGenerationResponse(BaseModel):
 
 class CodebaseAnalysisRequest(BaseModel):
     """Resolve a feature contract against the monolith graph and requirements."""
+    product: Optional[str] = Field(None, max_length=100)
+    release: Optional[str] = Field(None, max_length=100)
     contract_path: Optional[str] = Field(
         None, max_length=1000,
         description="Path to contract_{ticket}.json (feature scope + seedSymbols)",
@@ -290,6 +318,7 @@ class CodebaseAnalysisResponse(BaseModel):
     source_path: str
     contract_path: Optional[str] = None
     artifact_path: str
+    artifact_paths: Dict = Field(default_factory=dict)
     stats: Dict
     started_at: str
     completed_at: str
@@ -297,6 +326,8 @@ class CodebaseAnalysisResponse(BaseModel):
 
 class HLDGenerationRequest(BaseModel):
     """Generate HLD from the latest (or specified) requirements + code_graph artifacts."""
+    product: Optional[str] = Field(None, max_length=100)
+    release: Optional[str] = Field(None, max_length=100)
     requirements_path: Optional[str] = Field(None, max_length=1000)
     code_graph_path: Optional[str] = Field(None, max_length=1000)
 
@@ -313,6 +344,7 @@ class HLDGenerationResponse(BaseModel):
 class PipelineRunRequest(BaseModel):
     """End-to-end orchestration: requirements -> codebase -> HLD."""
     confluence_product: Optional[str] = Field(None, max_length=100)
+    release: Optional[str] = Field(None, max_length=100)
     contract_path: Optional[str] = Field(None, max_length=1000)
     ticket: Optional[str] = Field(None, max_length=50)
     graph_path: Optional[str] = Field(None, max_length=1000)
@@ -373,12 +405,16 @@ class MDDModuleCatalogResponse(BaseModel):
 class MDDGenerateRequest(BaseModel):
     selected_modules: List[str] = Field(..., min_length=1)
     ticket: Optional[str] = Field(None, max_length=50)
+    product: Optional[str] = Field(None, max_length=100)
+    release: Optional[str] = Field(None, max_length=100)
 
 
 class MDDGeneratedModule(BaseModel):
     module: str
     slug: str
     path: str
+    plan_path: Optional[str] = None
+    docx_path: Optional[str] = None
     sections_included: List[str] = Field(default_factory=list)
     sections_skipped: List[str] = Field(default_factory=list)
 

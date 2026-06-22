@@ -6,7 +6,7 @@ from models.schemas import (
     RequirementsGenerationRequest,
     RequirementsGenerationResponse,
 )
-from services.requirements_generator import generate_requirements
+from services.requirements.requirements_generator import generate_requirements
 
 router = APIRouter()
 
@@ -17,12 +17,17 @@ async def generate(request: RequirementsGenerationRequest) -> RequirementsGenera
     try:
         result = generate_requirements(
             product=request.product,
+            release=request.release,
             n_results=request.n_results,
         )
         return RequirementsGenerationResponse(
             job_id=result.job_id,
             product=result.product,
+            release=result.release,
             artifact_path=result.artifact_path,
+            artifact_paths={
+                "requirements": result.artifact_path,
+            },
             started_at=result.started_at,
             completed_at=result.completed_at,
             requirements=result.requirements,

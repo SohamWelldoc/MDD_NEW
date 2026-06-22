@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routes import ingestion, requirements, codebase, hld, mdd
+from routes import ingestion, requirements, codebase, hld, mdd, demo
 
 app = FastAPI(
     title="HLD Generation Pipeline API",
@@ -44,8 +44,8 @@ async def shutdown_event():
     """Clean up resources on shutdown"""
     print("[Stopping] Shutting down HLD Generation Pipeline API...")
     
-    # Close Qdrant connections
-    from services.db import close_qdrant_client
+    # Close vector-store handles
+    from services.artifact_store.db import close_qdrant_client
     try:
         close_qdrant_client()
     except Exception as e:
@@ -67,6 +67,7 @@ app.include_router(requirements.router, prefix="/api/requirements", tags=["requi
 app.include_router(codebase.router, prefix="/api/codebase", tags=["codebase"])
 app.include_router(hld.router, prefix="/api/hld", tags=["hld"])
 app.include_router(mdd.router, prefix="/api/mdd", tags=["mdd"])
+app.include_router(demo.router, prefix="/api/demo", tags=["demo"])
 
 # Serve frontend (optional - kept for future UI)
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
@@ -83,10 +84,10 @@ else:
             "service": "HLD Generation Pipeline API",
             "docs": "/docs",
             "pipeline": [
-                "POST /api/ingestion/start    (ingest Confluence pages into Qdrant)",
-                "POST /api/requirements/generate  (Confluence -> requirements.json)",
-                "POST /api/codebase/analyze   (contract + monolith graph -> code_graph.json)",
-                "POST /api/hld/generate       (requirements + code_graph -> HLD.md)",
+                "POST /api/ingestion/start    (Confluence -> product/release JSONL artifacts)",
+                "POST /api/requirements/generate  (Confluence RAG -> hld/requirements_<timestamp>.json)",
+                "POST /api/codebase/analyze   (contract + monolith graph -> codebase/code_graph_<timestamp>.json)",
+                "POST /api/hld/generate       (requirements + code_graph -> hld/HLD_<timestamp>.md/.docx)",
                 "POST /api/hld/run            (end-to-end orchestrator)",
                 "GET  /api/hld/latest         (raw HLD markdown)",
                 "GET  /api/mdd/modules       (module catalog for multi-select)",

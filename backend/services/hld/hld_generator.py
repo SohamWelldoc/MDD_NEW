@@ -31,9 +31,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .llm_client import get_llm_client
-from .mermaid_utils import postprocess_mermaid, validate_diagrams
-from .hld_validator import validate_hld
+from services.shared.llm_client import get_llm_client
+from services.shared.mermaid_utils import postprocess_mermaid, validate_diagrams
+from services.hld.hld_validator import validate_hld
+from services.artifact_store.artifact_paths import artifact_context
+from services.shared.docx_exporter import markdown_to_docx
 
 # Import query functions from agentic-orchestrator statically
 import sys
@@ -145,6 +147,153 @@ def _nfr_include_flags(requirements: Dict[str, Any]) -> Dict[str, bool]:
         "scalability": _section_has_content(hld.get("4_scalability_view", {})),
         "infrastructure": _section_has_content(hld.get("5_infrastructure_view", {})),
     }
+
+
+def _document_topic(requirements: Dict[str, Any], plan: Dict[str, Any]) -> str:
+    title = os.getenv("HLD_DOCUMENT_TITLE")
+    if title:
+        return re.sub(r"\s+high[- ]level\s+design$", "", title.strip(), flags=re.IGNORECASE)
+
+    intro = requirements.get("hld_content", {}).get("1_introduction", {})
+    scope = intro.get("1_1_purpose_and_scope", {})
+    in_scope = scope.get("in_scope") if isinstance(scope, dict) else None
+    if isinstance(in_scope, list) and in_scope:
+        topic = str(in_scope[0]).strip()
+        topic = re.sub(r"\s+feature$", "", topic, flags=re.IGNORECASE)
+        if topic:
+            return topic
+
+    project = plan.get("project_name") or requirements.get("project_name") or "System"
+    return str(project).strip() or "System"
+
+
+def _mermaid_id(value: str, used: set[str]) -> str:
+    base = re.sub(r"[^A-Za-z0-9_]", "", "".join(part.capitalize() for part in re.split(r"[^A-Za-z0-9]+", value) if part))
+    if not base:
+        base = "Node"
+    if base[0].isdigit():
+        base = f"N{base}"
+    candidate = base
+    index = 2
+    while candidate in used:
+        candidate = f"{base}{index}"
+        index += 1
+    used.add(candidate)
+    return candidate
+
+
+def _clean_mermaid_label(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace('"', "'")).strip()
+
+
+def _deterministic_context_diagram(requirements: Dict[str, Any], code_graph: Dict[str, Any]) -> str:
+    intro = requirements.get("hld_content", {}).get("1_introduction", {})
+    context = intro.get("1_4_context", {}) if isinstance(intro, dict) else {}
+    upstream = context.get("upstream_dependencies", []) if isinstance(context, dict) else []
+    downstream = context.get("downstream_consumers", []) if isinstance(context, dict) else []
+    topic = _document_topic(requirements, {})
+
+    used: set[str] = set()
+    system_id = _mermaid_id(topic, used)
+    lines = ["flowchart LR", f'    {system_id}["{_clean_mermaid_label(topic)}"]']
+
+    for idx, item in enumerate(upstream[:4], start=1):
+        name = item.get("system_name") or item.get("name") or f"Upstream {idx}"
+        trigger = item.get("trigger_event") or item.get("mechanism") or "provides input"
+        node_id = _mermaid_id(name, used)
+        lines.append(f'    {node_id}["{_clean_mermaid_label(name)}"] -->|"{_clean_mermaid_label(trigger)}"| {system_id}')
+
+    target_projects = code_graph.get("target_projects", []) or []
+    for project in target_projects[:5]:
+        node_id = _mermaid_id(project, used)
+        label = Path(str(project).replace("\\", "/")).name or str(project)
+        lines.append(f'    {system_id} --> {node_id}["{_clean_mermaid_label(label)}"]')
+
+    for decision in code_graph.get("resolved_at_checkpoint_b", []) or []:
+        if "jsonrepository" in str(decision).lower() or "mongo" in str(decision).lower():
+            repo_id = _mermaid_id("JSONRepository Mongo", used)
+            lines.append(f'    {system_id} -->|"{_clean_mermaid_label("persists state")}"| {repo_id}["JSONRepository / Mongo"]')
+            break
+
+    for idx, item in enumerate(downstream[:4], start=1):
+        name = item.get("system_name") or item.get("name") or f"Downstream {idx}"
+        data = item.get("data_transmitted") or item.get("mechanism") or "consumes output"
+        node_id = _mermaid_id(name, used)
+        lines.append(f'    {system_id} -->|"{_clean_mermaid_label(data)}"| {node_id}["{_clean_mermaid_label(name)}"]')
+
+    if len(lines) == 2:
+        lines.append(f'    User["User"] -->|"uses"| {system_id}')
+        lines.append(f'    {system_id} -->|"returns result"| User')
+
+    return "\n".join(lines)
+
+
+def _deterministic_sequence_diagram(code_graph: Dict[str, Any]) -> str:
+    flows = code_graph.get("mapping", {}).get("mapped_flows", []) or []
+    flow = flows[0] if flows else {}
+    steps = sorted(flow.get("steps", []) or [], key=lambda step: step.get("step_number", 0))
+    if not steps:
+        return ""
+
+    used_ids: set[str] = set()
+    participant_by_component: Dict[str, tuple[str, str]] = {}
+
+    def participant(component: str) -> tuple[str, str]:
+        if component not in participant_by_component:
+            participant_by_component[component] = (_mermaid_id(component, used_ids), component)
+        return participant_by_component[component]
+
+    messages: List[tuple[str, str, str]] = []
+    for step in steps[:8]:
+        src_component = step.get("source_component") or "Source"
+        dst_component = step.get("destination_component") or "Destination"
+        src_id, _src_label = participant(src_component)
+        dst_id, _dst_label = participant(dst_component)
+        operation = _clean_mermaid_label(step.get("operation_signature") or f"{src_component} to {dst_component}")
+        messages.append((src_id, dst_id, operation))
+
+    lines = ["sequenceDiagram"]
+    for pid, label in participant_by_component.values():
+        lines.append(f'    participant {pid} as "{_clean_mermaid_label(label)}"')
+    for src_id, dst_id, operation in messages:
+        lines.append(f"    {src_id}->>{dst_id}: {operation}")
+    return "\n".join(lines)
+
+
+def _replace_mermaid_blocks_with_deterministic(
+    markdown: str,
+    requirements: Dict[str, Any],
+    code_graph: Dict[str, Any],
+) -> str:
+    context_diagram = _deterministic_context_diagram(requirements, code_graph)
+    sequence_diagram = _deterministic_sequence_diagram(code_graph)
+    replacements = [context_diagram, sequence_diagram]
+    index = 0
+
+    def replace(match: re.Match) -> str:
+        nonlocal index
+        if index >= len(replacements) or not replacements[index]:
+            index += 1
+            return match.group(0)
+        block = replacements[index]
+        index += 1
+        return f"```mermaid\n{block}\n```"
+
+    updated = re.sub(r"```mermaid\s*\n(.*?)```", replace, markdown, flags=re.DOTALL)
+    if sequence_diagram and sequence_diagram not in updated:
+        sequence_block = f"\n```mermaid\n{sequence_diagram}\n```\n"
+        flow_heading = re.search(r"(####\s+[^\n]*Flow[^\n]*\n)", updated, flags=re.IGNORECASE)
+        if flow_heading:
+            insert_at = flow_heading.end()
+            updated = updated[:insert_at] + sequence_block + updated[insert_at:]
+        else:
+            interactions_heading = re.search(r"(###\s+2\.\d+\s+Interactions and Flows[^\n]*\n)", updated, flags=re.IGNORECASE)
+            if interactions_heading:
+                insert_at = interactions_heading.end()
+                updated = updated[:insert_at] + "\n#### Primary Flow\n" + sequence_block + updated[insert_at:]
+            else:
+                updated += "\n\n### 2.y Interactions and Flows\n#### Primary Flow\n" + sequence_block
+    return updated
 
 
 def _normalize_plan(
@@ -687,7 +836,33 @@ def _resolve_ac_symbol(
                     return f"`{name}`"
                 if name:
                     return f"`{_markdown_table_cell(name)[:120]}`"
-    return "Not mapped in code graph"
+
+    new_capability = _new_capability_seed(seeds)
+    if new_capability:
+        return f"NEW capability (contract-defined): `{_markdown_table_cell(new_capability)[:140]}`"
+
+    verifies_text = _markdown_table_cell(ac.get("verifiesText", ""))
+    if verifies_text:
+        return f"Contract-defined behavior; code symbol not pinned yet ({verifies_text[:160]})"
+
+    return "Contract-defined behavior; code symbol not pinned yet"
+
+
+def _new_capability_seed(seeds: List[Dict[str, Any]]) -> str:
+    preferred: List[str] = []
+    fallback: List[str] = []
+    for seed in seeds:
+        name = seed.get("name", "")
+        if not name:
+            continue
+        lowered = name.lower()
+        if seed.get("relation") == "new" or "capability" in lowered or "engine" in lowered or "lifecycle" in lowered:
+            preferred.append(name)
+        elif seed.get("is_new_capability"):
+            fallback.append(name)
+    if preferred:
+        return preferred[0]
+    return fallback[0] if fallback else ""
 
 
 def _render_traceability_table(code_graph: Dict[str, Any]) -> str:
@@ -944,7 +1119,7 @@ _HLD_SYSTEM = (
 
 
 def _hld_intro_prompt(plan: Dict[str, Any], requirements: Dict[str, Any], codebase_context: str) -> str:
-    project = plan.get("project_name") or requirements.get("project_name") or "System"
+    project = _document_topic(requirements, plan)
     section_reqs = requirements.get("hld_content", {}).get("1_introduction", {})
     return "\n\n".join([
         f"Generate the Introduction section (Section 1) for the HLD of project '{project}'.",
@@ -1099,6 +1274,8 @@ def _coerce_json(raw: str) -> Dict[str, Any]:
 # ----------------------------------------------------------------------
 def generate_hld(
     *,
+    product: Optional[str] = None,
+    release: Optional[str] = None,
     requirements_path: Optional[str] = None,
     code_graph_path: Optional[str] = None,
     artifact_dir: Optional[str] = None,
@@ -1111,11 +1288,17 @@ def generate_hld(
     Both artifact paths default to the `*_latest.json` pointers written
     by the upstream services.
     """
-    out_dir = artifact_dir or os.getenv("ARTIFACT_DIR", "./artifacts")
+    context = artifact_context(product=product, release=release, create=True)
+    out_dir = artifact_dir or str(context.stage_dir("hld"))
     os.makedirs(out_dir, exist_ok=True)
+    hld_run_dir = Path(out_dir) / context.timestamp
+    hld_run_dir.mkdir(parents=True, exist_ok=True)
 
-    req_payload = _load_json(requirements_path) if requirements_path else _load_default_artifact(out_dir, "requirements")
-    code_payload = _load_json(code_graph_path) if code_graph_path else _load_default_artifact(out_dir, "code_graph")
+    codebase_dir = context.stage_dir("codebase")
+    default_requirements_path = str(_latest_requirements(out_dir) or Path(out_dir) / "requirements.json")
+    default_code_graph_path = str(_latest_code_graph(codebase_dir) or Path(codebase_dir) / "code_graph.json")
+    req_payload = _load_json(requirements_path or default_requirements_path)
+    code_payload = _load_json(code_graph_path or default_code_graph_path)
 
     requirements = req_payload.get("requirements", req_payload)
     code_graph = code_payload.get("code_graph", code_payload)
@@ -1135,15 +1318,32 @@ def generate_hld(
     try:
         plan = _coerce_json(plan_raw)
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"Planner LLM did not return valid JSON: {exc}\n---\n{plan_raw[:800]}"
-        ) from exc
+        print(f"[HLD Pipeline] Planner returned invalid JSON; using deterministic fallback plan: {exc}")
+        plan = {
+            "project_name": requirements.get("project_name") or context.product,
+            "include_sections": {
+                "introduction": True,
+                "definitions_and_acronyms": True,
+                "references": True,
+                "context": True,
+                "logical_view": True,
+                "security": False,
+                "scalability": False,
+                "infrastructure": False,
+            },
+            "modules": [
+                {"name": project, "responsibility": f"Target project for {_document_topic(requirements, {})}"}
+                for project in code_graph.get("target_projects", [])[:8]
+            ],
+            "diagrams_required": {
+                "top_level_architecture": True,
+                "combined_modules": False,
+                "infrastructure_topology": False,
+            },
+            "reasoning": "Deterministic fallback plan because planner LLM returned invalid JSON.",
+        }
 
     plan = _normalize_plan(plan, requirements, code_graph)
-
-    plan_path = os.path.join(out_dir, "plan.json")
-    with open(plan_path, "w", encoding="utf-8") as fh:
-        json.dump(plan, fh, indent=2, ensure_ascii=False)
 
     # ---- Pass 1: HLD markdown (Generated section-by-section) -----------
     codebase_context = _get_codebase_context(requirements, code_graph)
@@ -1226,7 +1426,7 @@ def generate_hld(
         print("[HLD Pipeline] Skipping Section 5: no infrastructure content in requirements.json")
         
     # Assemble cover and Revision History & TOC
-    project = plan.get("project_name") or requirements.get("project_name") or "System"
+    project = _document_topic(requirements, plan)
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
     
     cover = [
@@ -1265,30 +1465,36 @@ def generate_hld(
 
     # ---- Pass 2: sanitize + validate diagrams --------------------------
     hld_clean = postprocess_mermaid(hld_raw)
+    hld_clean = _replace_mermaid_blocks_with_deterministic(hld_clean, requirements, code_graph)
 
     diagram_report = validate_diagrams(hld_clean)
     accuracy_report = validate_hld(hld_clean, code_graph, requirements=requirements)
 
     # ---- Pass 3: persist -----------------------------------------------
     completed_at = datetime.utcnow().isoformat()
-    hld_path = os.path.join(out_dir, "HLD.md")
-    with open(hld_path, "w", encoding="utf-8") as fh:
-        fh.write(hld_clean)
+    docx_path = str(hld_run_dir / f"HLD_{context.timestamp}.docx")
+    markdown_to_docx(hld_clean, docx_path)
+    if not os.path.isfile(docx_path):
+        raise RuntimeError(f"DOCX export did not create expected file: {docx_path}")
 
     manifest = {
         "job_id": job_id,
         "started_at": started_at,
         "completed_at": completed_at,
         "llm": llm.info(),
-        "requirements_source": requirements_path or os.path.join(out_dir, "requirements.json"),
-        "code_graph_source": code_graph_path or os.path.join(out_dir, "code_graph.json"),
-        "plan_path": plan_path,
-        "hld_path": hld_path,
+        "product": context.product,
+        "release": context.release,
+        "timestamp": context.timestamp,
+        "requirements_source": requirements_path or default_requirements_path,
+        "code_graph_source": code_graph_path or default_code_graph_path,
+        "plan": plan,
+        "hld_markdown": hld_clean,
+        "docx_path": docx_path,
         "diagram_report": diagram_report,
         "accuracy_report": accuracy_report,
         "nfr_sections": plan.get("nfr_sections", {}),
     }
-    manifest_path = os.path.join(out_dir, "hld_manifest.json")
+    manifest_path = str(hld_run_dir / f"HLD_{context.timestamp}.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, ensure_ascii=False)
 
@@ -1300,8 +1506,23 @@ def generate_hld(
         hld_markdown=hld_clean,
         diagram_report=diagram_report,
         artifact_paths={
-            "plan": plan_path,
-            "hld": hld_path,
-            "manifest": manifest_path,
+            "docx": docx_path,
+            "hld_json": manifest_path,
         },
     )
+
+
+def _latest_code_graph(codebase_dir: str | Path) -> Path | None:
+    root = Path(codebase_dir)
+    matches = [path for path in root.glob("code_graph_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return max(matches, key=lambda path: path.stat().st_mtime)
+
+
+def _latest_requirements(hld_dir: str | Path) -> Path | None:
+    root = Path(hld_dir)
+    matches = [path for path in root.glob("requirements_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return max(matches, key=lambda path: path.stat().st_mtime)

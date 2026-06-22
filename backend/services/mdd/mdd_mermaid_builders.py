@@ -160,7 +160,7 @@ def build_architecture_flowchart(bundle: Dict[str, Any]) -> str:
 
 def build_use_case_flowchart(bundle: Dict[str, Any]) -> str:
     """§3 use-case flow — flowchart TD from filtered flow steps."""
-    flows = bundle.get("filtered_flows") or []
+    flows = bundle.get("use_cases") or bundle.get("filtered_flows") or []
     if not flows:
         return ""
 
@@ -177,7 +177,7 @@ def build_use_case_flowchart(bundle: Dict[str, Any]) -> str:
     step_number = 1
     for flow in flows:
         prev_dst: Optional[str] = None
-        for step in flow.get("step_by_step_sequence") or []:
+        for step in flow.get("steps") or flow.get("step_by_step_sequence") or []:
             src = step.get("source_component", "Source")
             dst = step.get("destination_component", "Destination")
             op_label = str(step.get("step_number") or step_number)
@@ -191,6 +191,37 @@ def build_use_case_flowchart(bundle: Dict[str, Any]) -> str:
             step_number += 1
 
     return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def build_use_case_flowcharts(bundle: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """One §3 flowchart per normalized use case."""
+    diagrams: List[Tuple[str, str]] = []
+    for index, flow in enumerate(bundle.get("use_cases") or [], start=1):
+        steps = flow.get("steps") or []
+        if not steps:
+            continue
+        used: Set[str] = set()
+        node_labels: Dict[str, str] = {}
+        lines = ["flowchart LR"]
+
+        def _node(comp: str) -> str:
+            label = comp or "Component"
+            if label not in node_labels:
+                node_labels[label] = _safe_id(label.replace(" ", ""), used)
+                lines.append(f"    {node_labels[label]}[{_quote_label(label)}]")
+            return node_labels[label]
+
+        prev_dst: Optional[str] = None
+        for step_number, step in enumerate(steps, start=1):
+            src_id = _node(step.get("source_component", "Source"))
+            dst_id = _node(step.get("destination_component", "Destination"))
+            from_id = prev_dst if prev_dst else src_id
+            label = str(step.get("step_number") or step_number)
+            lines.append(f"    {from_id} -->|{_quote_label(label)}| {dst_id}")
+            prev_dst = dst_id
+        if len(lines) > 1:
+            diagrams.append((flow.get("title") or f"Use Case {index}", "\n".join(lines)))
+    return diagrams
 
 
 def build_class_diagram(bundle: Dict[str, Any]) -> str:
@@ -258,7 +289,7 @@ def _participant_id(name: str, used: Set[str]) -> Tuple[str, str]:
 
 def build_sequence_diagram(bundle: Dict[str, Any]) -> str:
     """§5 sequenceDiagram from filtered flow steps."""
-    flows = bundle.get("filtered_flows") or []
+    flows = bundle.get("sequence_flows") or bundle.get("use_cases") or bundle.get("filtered_flows") or []
     if not flows:
         return ""
 
@@ -268,7 +299,7 @@ def build_sequence_diagram(bundle: Dict[str, Any]) -> str:
     msg_lines: List[str] = []
 
     for flow in flows:
-        for step in flow.get("step_by_step_sequence") or []:
+        for step in flow.get("steps") or flow.get("step_by_step_sequence") or []:
             src = step.get("source_component", "")
             dst = step.get("destination_component", "")
             op = (step.get("operation_signature") or "call")[:60].replace("\n", " ")
@@ -292,6 +323,56 @@ def build_sequence_diagram(bundle: Dict[str, Any]) -> str:
         lines.append(f'    participant {pid} as "{alias}"')
     lines.extend(msg_lines)
     return "\n".join(lines)
+
+
+def build_sequence_diagrams(bundle: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """One §5 sequenceDiagram per normalized sequence flow."""
+    diagrams: List[Tuple[str, str]] = []
+    for index, flow in enumerate(bundle.get("sequence_flows") or bundle.get("use_cases") or [], start=1):
+        steps = flow.get("steps") or []
+        if not steps:
+            continue
+        used: Set[str] = set()
+        participants_order: List[Tuple[str, str]] = []
+        participants: Dict[str, str] = {}
+        messages: List[str] = []
+        for step in steps:
+            src = step.get("source_component", "")
+            dst = step.get("destination_component", "")
+            op = (step.get("operation_signature") or "call")[:70].replace("\n", " ")
+            for comp in (src, dst):
+                if comp and comp not in participants:
+                    pid, alias = _participant_id(comp, used)
+                    participants[comp] = pid
+                    participants_order.append((pid, alias.replace('"', "'")))
+            if src in participants and dst in participants:
+                messages.append(f"    {participants[src]}->>{participants[dst]}: {op}")
+        if messages:
+            lines = ["sequenceDiagram"]
+            for pid, alias in participants_order:
+                lines.append(f'    participant {pid} as "{alias}"')
+            lines.extend(messages)
+            diagrams.append((flow.get("title") or f"Sequence Flow {index}", "\n".join(lines)))
+    return diagrams
+
+
+def build_data_model_diagram(bundle: Dict[str, Any]) -> str:
+    """§7 data model relationships from DTO/entity evidence."""
+    models = bundle.get("data_models") or []
+    if not models:
+        return ""
+    lines = ["classDiagram"]
+    module_id = _safe_class_name(bundle.get("slug", "") or bundle.get("logical_name", "") or "Module") or "Module"
+    lines.append(f"    class {module_id}")
+    declared = {module_id}
+    for model in models[:10]:
+        name = _safe_class_name(model.get("name", ""))
+        if not name or name in declared:
+            continue
+        declared.add(name)
+        lines.append(f"    class {name}")
+        lines.append(f"    {module_id} ..> {name} : uses")
+    return "\n".join(lines) if len(lines) > 2 else ""
 
 
 def build_mdd_diagrams(bundle: Dict[str, Any], include: Dict[str, Any]) -> Dict[str, str]:
@@ -321,5 +402,10 @@ def build_mdd_diagrams(bundle: Dict[str, Any], include: Dict[str, Any]) -> Dict[
             hld_diagrams = bundle.get("sequence_diagrams") or []
             if hld_diagrams:
                 diagrams["sequence"] = hld_diagrams[0].strip()
+
+    if include.get("data_model_design"):
+        d = build_data_model_diagram(bundle)
+        if d:
+            diagrams["data_model"] = d
 
     return diagrams

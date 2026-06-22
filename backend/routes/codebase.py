@@ -6,7 +6,7 @@ from models.schemas import (
     CodebaseAnalysisRequest,
     CodebaseAnalysisResponse,
 )
-from services.codebase_analyzer import analyze_codebase
+from services.codebase.codebase_analyzer import analyze_codebase
 
 router = APIRouter()
 
@@ -16,6 +16,8 @@ async def analyze(request: CodebaseAnalysisRequest) -> CodebaseAnalysisResponse:
     """Resolve a feature contract against the monolith graph and requirements."""
     try:
         result = analyze_codebase(
+            product=request.product,
+            release=request.release,
             contract_path=request.contract_path,
             ticket=request.ticket,
             graph_path=request.graph_path,
@@ -26,6 +28,9 @@ async def analyze(request: CodebaseAnalysisRequest) -> CodebaseAnalysisResponse:
             source_path=result.source_path,
             contract_path=result.contract_path,
             artifact_path=result.artifact_path,
+            artifact_paths={
+                "code_graph": result.artifact_path,
+            },
             stats=result.code_graph.get("stats", {}),
             started_at=result.started_at,
             completed_at=result.completed_at,

@@ -30,8 +30,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from services.artifact_store.artifact_paths import artifact_context
+
 # Add agentic-orchestrator to sys.path statically
-_ORCHESTRATOR_DIR = str(Path(__file__).resolve().parent.parent.parent / "agentic-orchestrator")
+_ORCHESTRATOR_DIR = str(Path(__file__).resolve().parents[3] / "agentic-orchestrator")
 if _ORCHESTRATOR_DIR not in sys.path:
     sys.path.insert(0, _ORCHESTRATOR_DIR)
 
@@ -74,7 +76,7 @@ class CodebaseAnalysisResult:
 
 
 def _workspace_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
+    return Path(__file__).resolve().parents[3]
 
 
 def _resolve_graph_path(override: Optional[str] = None) -> str:
@@ -83,7 +85,13 @@ def _resolve_graph_path(override: Optional[str] = None) -> str:
     if override:
         p = Path(override)
         if not p.is_absolute():
-            p = root / p
+            candidates = [
+                (root / p).resolve(),
+                (root / "backend" / p).resolve(),
+            ]
+            for candidate in candidates:
+                if candidate.is_file():
+                    return str(candidate)
         if p.is_file():
             return str(p.resolve())
         raise FileNotFoundError(f"Graph not found at {override}")
@@ -91,7 +99,7 @@ def _resolve_graph_path(override: Optional[str] = None) -> str:
     env = os.getenv("GRAPH_PATH", "../graph.json")
     p = Path(env)
     if not p.is_absolute():
-        p = (Path(__file__).resolve().parent.parent / env).resolve()
+        p = (_workspace_root() / "backend" / env).resolve()
     if not p.is_file():
         p = root / "graph.json"
     if not p.is_file():
@@ -1023,6 +1031,8 @@ def _ensure_graph_indexed(graph_path: str) -> Dict[str, Any]:
 # ----------------------------------------------------------------------
 def analyze_codebase(
     *,
+    product: Optional[str] = None,
+    release: Optional[str] = None,
     contract_path: Optional[str] = None,
     ticket: Optional[str] = None,
     graph_path: Optional[str] = None,
@@ -1037,10 +1047,12 @@ def analyze_codebase(
     resolved_graph = _resolve_graph_path(graph_override)
     monolith_stats = _ensure_graph_indexed(resolved_graph)
 
-    out_dir = artifact_dir or os.getenv("ARTIFACT_DIR", "./artifacts")
+    context = artifact_context(product=product, release=release, create=True)
+    out_dir = artifact_dir or str(context.stage_dir("codebase"))
     os.makedirs(out_dir, exist_ok=True)
 
-    req_path = os.path.join(out_dir, "requirements.json")
+    hld_dir = context.stage_dir("hld")
+    req_path = str(_latest_requirements(hld_dir) or Path(hld_dir) / "requirements.json")
     requirements: Dict[str, Any] = {}
     if os.path.isfile(req_path):
         print(f"Loading Confluence requirements from {req_path}...")
@@ -1051,6 +1063,10 @@ def analyze_codebase(
     resolved_contract = _resolve_contract_path(contract_path, ticket, requirements)
     contract = _load_contract(resolved_contract)
     print(f"Loaded feature contract: {resolved_contract}")
+
+    contract_snapshot_path = os.path.join(out_dir, f"contract_{context.timestamp}.json")
+    with open(contract_snapshot_path, "w", encoding="utf-8") as fh:
+        json.dump(contract, fh, indent=2, ensure_ascii=False)
 
     orchestrator_dir = str(_workspace_root() / "agentic-orchestrator")
     if orchestrator_dir not in sys.path:
@@ -1103,25 +1119,21 @@ def analyze_codebase(
         "mapping": mapping_res,
     }
 
-    md_content = _generate_codebase_summary_markdown(
-        raw["stats"], mapping_res, requirements, job_id, completed_at, seed_resolutions
-    )
-    md_path = os.path.join(out_dir, "codebase_summary.md")
-    with open(md_path, "w", encoding="utf-8") as fh:
-        fh.write(md_content)
-    print(f"Generated codebase mapping document at {md_path}")
-
-    artifact_path = os.path.join(out_dir, "code_graph.json")
+    timestamped_artifact_path = os.path.join(out_dir, f"code_graph_{context.timestamp}.json")
     payload = {
         "job_id": job_id,
         "graph_path": resolved_graph,
         "contract_path": resolved_contract,
+        "contract_snapshot_path": contract_snapshot_path,
+        "product": context.product,
+        "release": context.release,
+        "timestamp": context.timestamp,
         "started_at": started_at,
         "completed_at": completed_at,
         "analyzer": "contract_graph_index",
         "code_graph": raw,
     }
-    with open(artifact_path, "w", encoding="utf-8") as fh:
+    with open(timestamped_artifact_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
 
     return CodebaseAnalysisResult(
@@ -1131,6 +1143,14 @@ def analyze_codebase(
         started_at=started_at,
         completed_at=completed_at,
         code_graph=raw,
-        artifact_path=artifact_path,
+        artifact_path=timestamped_artifact_path,
     )
+
+
+def _latest_requirements(hld_dir: str | Path) -> Path | None:
+    root = Path(hld_dir)
+    matches = [path for path in root.glob("requirements_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return max(matches, key=lambda path: path.stat().st_mtime)
 

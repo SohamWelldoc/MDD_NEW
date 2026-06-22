@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MDD_NEW Design Generation Demo</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #627089;
+      --line: #d8e0ec;
+      --brand: #2357d9;
+      --brand-dark: #183fa5;
+      --ok: #0f7b4f;
+      --warn: #a35a00;
+      --err: #b42318;
+      --soft: #eef4ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: var(--ink);
+      background: linear-gradient(135deg, #eef4ff 0%, var(--bg) 46%, #fff 100%);
+    }
+    header {
+      padding: 32px 40px 20px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,0.8);
+      backdrop-filter: blur(8px);
+    }
+    h1 { margin: 0; font-size: 30px; letter-spacing: -0.03em; }
+    .subtitle { margin-top: 8px; color: var(--muted); max-width: 920px; }
+    main { padding: 28px 40px 48px; }
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 18px 45px rgba(31, 50, 88, 0.08);
+      overflow: hidden;
+    }
+    .card h2 {
+      margin: 0;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+      font-size: 18px;
+    }
+    .card-body { padding: 20px; }
+    label { display: block; font-weight: 650; margin: 14px 0 7px; }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 11px 12px;
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+    }
+    textarea { min-height: 190px; resize: vertical; font-family: Consolas, monospace; font-size: 13px; }
+    button {
+      border: 0;
+      border-radius: 11px;
+      padding: 12px 16px;
+      font-weight: 700;
+      cursor: pointer;
+      background: var(--brand);
+      color: #fff;
+      transition: 0.15s ease;
+    }
+    button:hover { background: var(--brand-dark); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .secondary { background: #e9eef8; color: var(--ink); }
+    .secondary:hover { background: #dbe5f6; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .actions { margin-top: 18px; }
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .step {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 14px;
+      padding: 14px;
+    }
+    .step strong { display: block; }
+    .step span { display: block; color: var(--muted); margin-top: 4px; font-size: 13px; }
+    .step.active { border-color: var(--brand); background: var(--soft); }
+    .status {
+      margin-top: 14px;
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .status.ok { color: var(--ok); background: #ecfdf3; border-color: #bbf7d0; }
+    .status.err { color: var(--err); background: #fff1f0; border-color: #fecaca; }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+    .doc {
+      min-height: 420px;
+      max-height: 720px;
+      overflow: auto;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      line-height: 1.55;
+    }
+    .doc h1, .doc h2, .doc h3 { color: #111827; }
+    .doc table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 12px 0;
+      font-size: 13px;
+    }
+    .doc th, .doc td { border: 1px solid var(--line); padding: 8px; vertical-align: top; }
+    .doc th { background: #f2f5fa; }
+    .modules {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }
+    .module {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      background: #fff;
+    }
+    .module label { margin: 0; display: flex; gap: 10px; align-items: flex-start; }
+    .module input { width: auto; margin-top: 4px; }
+    .pill {
+      display: inline-flex;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #3446a0;
+      font-size: 12px;
+      margin: 8px 6px 0 0;
+    }
+    .downloads a {
+      display: inline-block;
+      margin: 8px 10px 0 0;
+      color: var(--brand);
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .small { color: var(--muted); font-size: 13px; }
+    .hidden { display: none; }
+    @media (max-width: 980px) {
+      .grid, .split, .steps { grid-template-columns: 1fr; }
+      header, main { padding-left: 20px; padding-right: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>HLD and MDD Generation Demo</h1>
+    <div class="subtitle">Enter a Confluence page URL and contract JSON, generate the HLD, dynamically extract modules, then select modules to generate MDD documents.</div>
+  </header>
+
+  <main>
+    <div class="steps">
+      <div class="step active" id="step-1"><strong>1. Inputs</strong><span>Confluence URL and contract</span></div>
+      <div class="step" id="step-2"><strong>2. HLD</strong><span>Generate and review design</span></div>
+      <div class="step" id="step-3"><strong>3. Modules</strong><span>Extracted from artifacts</span></div>
+      <div class="step" id="step-4"><strong>4. MDD</strong><span>Select and generate</span></div>
+    </div>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Demo Inputs</h2>
+        <div class="card-body">
+          <label for="confluenceUrl">Confluence Page URL</label>
+          <input id="confluenceUrl" placeholder="https://welldoc.atlassian.net/wiki/spaces/.../pages/..." />
+
+          <div class="row">
+            <div style="flex: 1">
+              <label for="product">Product</label>
+              <input id="product" placeholder="optional, inferred if blank" />
+            </div>
+            <div style="flex: 1">
+              <label for="release">Release</label>
+              <input id="release" placeholder="optional, inferred if blank" />
+            </div>
+          </div>
+
+          <label for="ticket">Ticket / Contract ID</label>
+          <input id="ticket" placeholder="e.g. AL-27103" />
+
+          <label for="contractFile">Contract JSON File</label>
+          <input id="contractFile" type="file" accept=".json,application/json" />
+
+          <label for="contractJson">Or Paste Contract JSON</label>
+          <textarea id="contractJson" placeholder="{ ... }"></textarea>
+
+          <label style="display:flex; gap:10px; align-items:flex-start; font-weight:600;">
+            <input id="fastMode" type="checkbox" checked style="width:auto; margin-top:4px;" />
+            <span>
+              Fast demo mode
+              <span class="small" style="display:block; font-weight:400;">Reuse existing ingestion, requirements, and codebase artifacts when available for the product/release.</span>
+            </span>
+          </label>
+
+          <div class="actions row">
+            <button id="generateHldBtn">Generate HLD</button>
+            <button class="secondary" id="resetBtn" type="button">Reset View</button>
+          </div>
+          <div id="status" class="status">Ready.</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Showcase Output</h2>
+        <div class="card-body">
+          <div id="hldPanel">
+            <div class="row">
+              <button class="secondary" id="refreshHldBtn" disabled>Refresh HLD Preview</button>
+              <button id="nextModulesBtn" disabled>Next: Select MDD Modules</button>
+            </div>
+            <div class="downloads" id="hldDownloads"></div>
+            <h3>Generated HLD Preview</h3>
+            <div id="hldPreview" class="doc small">HLD will appear here after generation.</div>
+          </div>
+
+          <div id="modulePanel" class="hidden">
+            <div class="row">
+              <button class="secondary" id="backToHldBtn">Back to HLD</button>
+              <button id="generateMddBtn" disabled>Generate Selected MDD</button>
+            </div>
+            <h3>Dynamically Extracted Modules</h3>
+            <p class="small">These modules come from requirements, HLD, and code graph mappings. They are not hardcoded.</p>
+            <div id="moduleList" class="modules"></div>
+          </div>
+
+          <div id="mddPanel" class="hidden">
+            <div class="row">
+              <button class="secondary" id="backToModulesBtn">Back to Modules</button>
+            </div>
+            <h3>Generated MDD Documents</h3>
+            <div id="mddDownloads" class="downloads"></div>
+            <div class="split">
+              <div>
+                <h4>MDD Markdown Preview</h4>
+                <div id="mddPreview" class="doc small">Select a generated MDD to preview markdown.</div>
+              </div>
+              <div>
+                <h4>Generation Metadata</h4>
+                <div id="mddMeta" class="doc small">MDD metadata will appear here.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const state = {
+      product: "",
+      release: "",
+      ticket: "",
+      contractPath: "",
+      hldDocxPath: "",
+      modules: [],
+      generatedMdd: []
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function setStatus(message, type = "") {
+      const el = $("status");
+      el.textContent = message;
+      el.className = `status ${type}`;
+    }
+
+    function setBusy(busy) {
+      $("generateHldBtn").disabled = busy;
+      $("generateMddBtn").disabled = busy || !selectedModules().length;
+    }
+
+    function setStep(number) {
+      for (let i = 1; i <= 4; i++) $("step-" + i).classList.toggle("active", i === number);
+    }
+
+    function showPanel(name) {
+      $("hldPanel").classList.toggle("hidden", name !== "hld");
+      $("modulePanel").classList.toggle("hidden", name !== "modules");
+      $("mddPanel").classList.toggle("hidden", name !== "mdd");
+      setStep(name === "hld" ? 2 : name === "modules" ? 3 : name === "mdd" ? 4 : 1);
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options
+      });
+      if (!res.ok) {
+        let detail = await res.text();
+        try { detail = JSON.parse(detail).detail || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+      const type = res.headers.get("content-type") || "";
+      return type.includes("application/json") ? res.json() : res.text();
+    }
+
+    function artifactUrl(path) {
+      return `/api/demo/artifact?path=${encodeURIComponent(path)}`;
+    }
+
+    async function getArtifactStatus(product, release) {
+      const params = new URLSearchParams();
+      if (product) params.set("product", product);
+      if (release) params.set("release", release);
+      return api(`/api/demo/artifacts/status?${params.toString()}`);
+    }
+
+    function renderMarkdown(markdown) {
+      const escaped = markdown
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return escaped
+        .replace(/^### (.*)$/gm, "<h3>$1</h3>")
+        .replace(/^## (.*)$/gm, "<h2>$1</h2>")
+        .replace(/^# (.*)$/gm, "<h1>$1</h1>")
+        .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\n/g, "<br />");
+    }
+
+    async function readContract() {
+      const file = $("contractFile").files[0];
+      const text = file ? await file.text() : $("contractJson").value;
+      if (!text.trim()) throw new Error("Please upload or paste contract JSON.");
+      try { return JSON.parse(text); } catch (err) { throw new Error("Contract JSON is invalid."); }
+    }
+
+    function normalizeUrl(value) {
+      let url = (value || "").trim();
+      while (url.toLowerCase().startsWith("https://https://")) url = "https://" + url.slice(16);
+      while (url.toLowerCase().startsWith("http://http://")) url = "http://" + url.slice(14);
+      if (url && !/^https?:\/\//i.test(url)) url = "https://" + url;
+      return url;
+    }
+
+    async function pollIngestion(jobId) {
+      while (true) {
+        const status = await api(`/api/ingestion/status/${jobId}`);
+        setStatus(`Ingestion ${status.status}: ${status.progress}%\n${status.message || ""}`);
+        if (status.status === "completed") return status;
+        if (status.status === "failed") throw new Error(status.error || "Ingestion failed.");
+        await new Promise(resolve => setTimeout(resolve, 2500));
+      }
+    }
+
+    async function generateHld() {
+      setBusy(true);
+      showPanel("hld");
+      $("hldPreview").textContent = "Generating HLD. This can take several minutes...";
+      $("hldDownloads").innerHTML = "";
+      try {
+        const contract = await readContract();
+        const confluenceUrl = normalizeUrl($("confluenceUrl").value);
+        if (!confluenceUrl) throw new Error("Please enter the Confluence page URL.");
+        $("confluenceUrl").value = confluenceUrl;
+
+        let product = $("product").value.trim() || null;
+        let release = $("release").value.trim() || null;
+        const ticket = $("ticket").value.trim() || null;
+        const fastMode = $("fastMode").checked;
+        let artifactStatus = null;
+
+        if (fastMode) {
+          setStatus("Checking reusable artifacts for fast demo mode...");
+          artifactStatus = await getArtifactStatus(product, release);
+          product = artifactStatus.product;
+          release = artifactStatus.release;
+          $("product").value = product;
+          $("release").value = release;
+        }
+
+        if (fastMode && artifactStatus && artifactStatus.has_ingestion) {
+          state.product = artifactStatus.product;
+          state.release = artifactStatus.release;
+          setStatus(`Fast mode: reusing ingestion artifacts for ${state.product}/${state.release}.`);
+        } else {
+          setStatus("Starting Confluence ingestion...");
+          const ingest = await api("/api/demo/ingest", {
+            method: "POST",
+            body: JSON.stringify({ confluence_page_url: confluenceUrl, product, release })
+          });
+          const ingestStatus = await pollIngestion(ingest.job_id);
+          state.product = ingestStatus.product || product || "";
+          state.release = ingestStatus.release || release || "";
+        }
+
+        setStatus("Saving contract JSON...");
+        const saved = await api("/api/demo/contract", {
+          method: "POST",
+          body: JSON.stringify({ contract, product: state.product, release: state.release, ticket })
+        });
+        state.product = saved.product;
+        state.release = saved.release;
+        state.ticket = saved.ticket;
+        state.contractPath = saved.contract_path;
+
+        artifactStatus = fastMode ? await getArtifactStatus(state.product, state.release) : artifactStatus;
+
+        if (fastMode && artifactStatus && artifactStatus.has_requirements) {
+          setStatus(`Fast mode: reusing requirements artifact.\n${artifactStatus.paths.requirements}`);
+        } else {
+          setStatus("Generating requirements from ingested Confluence...");
+          await api("/api/requirements/generate", {
+            method: "POST",
+            body: JSON.stringify({ product: state.product, release: state.release, n_results: 8 })
+          });
+        }
+
+        artifactStatus = fastMode ? await getArtifactStatus(state.product, state.release) : artifactStatus;
+
+        if (fastMode && artifactStatus && artifactStatus.has_codebase) {
+          setStatus(`Fast mode: reusing codebase artifact.\n${artifactStatus.paths.code_graph}`);
+        } else {
+          setStatus("Analyzing codebase with uploaded contract...");
+          await api("/api/codebase/analyze", {
+            method: "POST",
+            body: JSON.stringify({
+              product: state.product,
+              release: state.release,
+              ticket: state.ticket,
+              contract_path: state.contractPath
+            })
+          });
+        }
+
+        setStatus("Generating HLD DOCX and JSON...");
+        const hld = await api("/api/hld/generate", {
+          method: "POST",
+          body: JSON.stringify({ product: state.product, release: state.release })
+        });
+        state.hldDocxPath = hld.artifact_paths.docx || "";
+        await refreshHldPreview();
+        renderHldDownloads();
+        $("nextModulesBtn").disabled = false;
+        $("refreshHldBtn").disabled = false;
+        setStatus(`HLD generated for ${state.product}/${state.release}.`, "ok");
+      } catch (err) {
+        $("hldPreview").textContent = "HLD generation failed.";
+        setStatus(err.message || String(err), "err");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function refreshHldPreview() {
+      const markdown = await api(`/api/hld/latest?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}`);
+      $("hldPreview").innerHTML = renderMarkdown(markdown);
+    }
+
+    function renderHldDownloads() {
+      const links = [];
+      if (state.hldDocxPath) links.push(`<a href="${artifactUrl(state.hldDocxPath)}" target="_blank">Download HLD DOCX</a>`);
+      links.push(`<a href="/api/hld/latest?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}" target="_blank">Open HLD Markdown</a>`);
+      $("hldDownloads").innerHTML = links.join("");
+    }
+
+    async function loadModules() {
+      showPanel("modules");
+      setStatus("Extracting MDD modules from latest requirements, HLD, and code graph...");
+      const catalog = await api(`/api/mdd/modules?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}`);
+      state.modules = catalog.modules || [];
+      renderModules();
+      setStatus(`Loaded ${state.modules.length} modules.`, "ok");
+    }
+
+    function renderModules() {
+      const list = $("moduleList");
+      if (!state.modules.length) {
+        list.innerHTML = "<p>No modules found. Generate HLD first.</p>";
+        return;
+      }
+      list.innerHTML = state.modules.map(mod => `
+        <div class="module">
+          <label>
+            <input type="checkbox" value="${mod.logical_name}" class="module-check" />
+            <span>
+              <strong>${mod.logical_name}</strong>
+              <span class="small">${mod.summary || "No summary available."}</span><br />
+              <span class="pill">${mod.architectural_layer || "Layer TBD"}</span>
+              <span class="pill">${mod.flow_count || 0} flow(s)</span>
+              <span class="pill">${mod.has_code_mapping ? "code mapped" : "not mapped"}</span>
+            </span>
+          </label>
+        </div>
+      `).join("");
+      document.querySelectorAll(".module-check").forEach(el => {
+        el.addEventListener("change", () => $("generateMddBtn").disabled = !selectedModules().length);
+      });
+    }
+
+    function selectedModules() {
+      return Array.from(document.querySelectorAll(".module-check:checked")).map(el => el.value);
+    }
+
+    async function generateMdd() {
+      const selected = selectedModules();
+      if (!selected.length) return;
+      setBusy(true);
+      setStatus(`Generating MDD for ${selected.join(", ")}...`);
+      try {
+        const result = await api("/api/mdd/generate", {
+          method: "POST",
+          body: JSON.stringify({
+            selected_modules: selected,
+            product: state.product,
+            release: state.release,
+            ticket: state.ticket
+          })
+        });
+        state.generatedMdd = result.generated || [];
+        renderMdd(result);
+        showPanel("mdd");
+        setStatus("MDD generated successfully.", "ok");
+      } catch (err) {
+        setStatus(err.message || String(err), "err");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function renderMdd(result) {
+      $("mddDownloads").innerHTML = state.generatedMdd.map(item => `
+        <a href="/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=docx" target="_blank">${item.module} DOCX</a>
+        <a href="/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=md" target="_blank">${item.module} Markdown</a>
+      `).join("");
+      $("mddMeta").innerHTML = `<pre>${JSON.stringify(result, null, 2)}</pre>`;
+      if (state.generatedMdd[0]) {
+        const item = state.generatedMdd[0];
+        const markdown = await api(`/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=md`);
+        $("mddPreview").innerHTML = renderMarkdown(markdown);
+      }
+    }
+
+    $("contractFile").addEventListener("change", async () => {
+      const file = $("contractFile").files[0];
+      if (file) $("contractJson").value = await file.text();
+    });
+    $("generateHldBtn").addEventListener("click", generateHld);
+    $("refreshHldBtn").addEventListener("click", refreshHldPreview);
+    $("nextModulesBtn").addEventListener("click", loadModules);
+    $("backToHldBtn").addEventListener("click", () => showPanel("hld"));
+    $("backToModulesBtn").addEventListener("click", () => showPanel("modules"));
+    $("generateMddBtn").addEventListener("click", generateMdd);
+    $("resetBtn").addEventListener("click", () => window.location.reload());
+  </script>
+</body>
+</html>

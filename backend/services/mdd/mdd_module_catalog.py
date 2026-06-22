@@ -19,7 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .mdd_template import slugify_module_name
+from services.mdd.mdd_template import slugify_module_name
+from services.artifact_store.artifact_paths import artifact_context, latest_matching
 
 
 @dataclass
@@ -177,6 +178,8 @@ def _requirements_module_by_name(
 
 def build_module_catalog(
     *,
+    product: Optional[str] = None,
+    release: Optional[str] = None,
     artifact_dir: Optional[str] = None,
     requirements_path: Optional[str] = None,
     hld_path: Optional[str] = None,
@@ -186,21 +189,24 @@ def build_module_catalog(
     """Build and persist the MDD module catalog from latest pipeline artifacts."""
     job_id = uuid.uuid4().hex[:8]
     started_at = datetime.utcnow().isoformat()
-    out_dir = artifact_dir or os.getenv("ARTIFACT_DIR", "./artifacts")
+    context = artifact_context(product=product, release=release, create=True)
+    out_dir = artifact_dir or str(context.stage_dir("mdd"))
     os.makedirs(out_dir, exist_ok=True)
 
-    req_path = requirements_path or os.path.join(out_dir, "requirements.json")
-    hld_file = hld_path or os.path.join(out_dir, "HLD.md")
-    cg_path = code_graph_path or os.path.join(out_dir, "code_graph.json")
+    hld_dir = context.stage_dir("hld")
+    codebase_dir = context.stage_dir("codebase")
+    req_path = requirements_path or _latest_requirements(hld_dir) or os.path.join(hld_dir, "requirements.json")
+    hld_file = hld_path or _latest_hld_json(hld_dir) or os.path.join(hld_dir, "HLD.json")
+    cg_path = code_graph_path or _latest_code_graph(codebase_dir) or os.path.join(codebase_dir, "code_graph.json")
 
     if not os.path.isfile(req_path):
         raise FileNotFoundError(f"requirements.json not found at {req_path}")
     if not os.path.isfile(hld_file):
-        raise FileNotFoundError(f"HLD.md not found at {hld_file}. Run HLD generation first.")
+        raise FileNotFoundError(f"HLD JSON not found at {hld_file}. Run HLD generation first.")
 
     req_payload = _load_json(req_path)
     requirements = req_payload.get("requirements", req_payload)
-    hld_markdown = Path(hld_file).read_text(encoding="utf-8")
+    hld_markdown = _load_hld_markdown(hld_file)
 
     code_graph: Dict[str, Any] = {}
     if os.path.isfile(cg_path):
@@ -283,10 +289,13 @@ def build_module_catalog(
         })
 
     completed_at = datetime.utcnow().isoformat()
-    artifact_path = os.path.join(out_dir, "mdd_modules.json")
+    timestamped_artifact_path = os.path.join(out_dir, f"mdd_modules_{context.timestamp}.json")
     payload = {
         "job_id": job_id,
         "ticket": resolved_ticket,
+        "product": context.product,
+        "release": context.release,
+        "timestamp": context.timestamp,
         "started_at": started_at,
         "completed_at": completed_at,
         "catalog_source": "requirements.json + HLD.md + code_graph.mapping",
@@ -297,7 +306,7 @@ def build_module_catalog(
         "requirements_path": os.path.abspath(req_path),
         "code_graph_path": os.path.abspath(cg_path) if os.path.isfile(cg_path) else None,
     }
-    with open(artifact_path, "w", encoding="utf-8") as fh:
+    with open(timestamped_artifact_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
 
     return ModuleCatalogResult(
@@ -305,19 +314,57 @@ def build_module_catalog(
         ticket=resolved_ticket,
         modules=catalog_modules,
         catalog_warnings=catalog_warnings,
-        artifact_path=artifact_path,
+        artifact_path=timestamped_artifact_path,
         started_at=started_at,
         completed_at=completed_at,
     )
 
 
-def load_module_catalog(artifact_dir: Optional[str] = None) -> Dict[str, Any]:
-    out_dir = artifact_dir or os.getenv("ARTIFACT_DIR", "./artifacts")
-    path = os.path.join(out_dir, "mdd_modules.json")
-    if not os.path.isfile(path):
-        result = build_module_catalog(artifact_dir=out_dir)
+def load_module_catalog(
+    artifact_dir: Optional[str] = None,
+    *,
+    product: Optional[str] = None,
+    release: Optional[str] = None,
+) -> Dict[str, Any]:
+    context = artifact_context(product=product, release=release, create=True)
+    out_dir = artifact_dir or str(context.stage_dir("mdd"))
+    latest = latest_matching(Path(out_dir), "mdd_modules_*.json")
+    if not latest:
+        result = build_module_catalog(product=product, release=release, artifact_dir=out_dir)
         return _load_json(result.artifact_path)
-    return _load_json(path)
+    return _load_json(str(latest))
+
+
+def _latest_hld_json(hld_dir: str | Path) -> Optional[str]:
+    root = Path(hld_dir)
+    matches = [path for path in root.glob("*/HLD_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return str(max(matches, key=lambda path: path.stat().st_mtime))
+
+
+def _latest_code_graph(codebase_dir: str | Path) -> Optional[str]:
+    root = Path(codebase_dir)
+    matches = [path for path in root.glob("code_graph_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return str(max(matches, key=lambda path: path.stat().st_mtime))
+
+
+def _latest_requirements(hld_dir: str | Path) -> Optional[str]:
+    root = Path(hld_dir)
+    matches = [path for path in root.glob("requirements_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return str(max(matches, key=lambda path: path.stat().st_mtime))
+
+
+def _load_hld_markdown(hld_json_path: str) -> str:
+    payload = _load_json(hld_json_path)
+    markdown = payload.get("hld_markdown")
+    if not markdown:
+        raise FileNotFoundError(f"hld_markdown not found in {hld_json_path}")
+    return markdown
 
 
 def get_catalog_module_names(catalog: Dict[str, Any]) -> List[str]:

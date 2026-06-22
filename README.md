@@ -2,9 +2,9 @@
 
 Generates a **High-Level Design (HLD)** document by combining three inputs:
 
-1. **Confluence pages** → structured requirements (`requirements.json`)
-2. **Monolith graph** (`graph.json`) + **feature contract** (`contract_AL-XXXXX.json`) → `code_graph.json`
-3. **HLD generator** → fuses both → `HLD.md` (Markdown with Mermaid diagrams)
+1. **Confluence pages** → structured requirements (`requirements_<timestamp>.json`)
+2. **Monolith graph** (`graph.json`) + **feature contract** (`contract_AL-XXXXX.json`) → `code_graph_<timestamp>.json`
+3. **HLD generator** → fuses both → `HLD_<timestamp>.md/.docx`
 
 Built on the production-tested Confluence RAG stack from
 [confluence-knowledge-chatbot](../confluence-knowledge-chatbot) — vector
@@ -30,27 +30,21 @@ MDD_NEW/
 │   ├── models/schemas.py             # Pydantic request/response models
 │   ├── routes/
 │   │   ├── health.py                 # /api/health
-│   │   ├── ingestion.py              # /api/ingestion  (Confluence -> Qdrant)
+│   │   ├── ingestion.py              # /api/ingestion  (Confluence -> JSONL)
 │   │   ├── chat.py                   # /api/chat       (optional, kept for debugging)
 │   │   ├── sessions.py               # /api/sessions   (chat session mgmt)
 │   │   ├── requirements.py           # /api/requirements/generate   *** NEW ***
 │   │   ├── codebase.py               # /api/codebase/analyze        *** NEW ***
 │   │   └── hld.py                    # /api/hld/{generate,run,latest} *** NEW ***
 │   └── services/
-│       ├── confluence.py             # Confluence client (reused)
-│       ├── preprocessor.py           # HTML -> Markdown (reused)
-│       ├── chunker.py / chunker_v2.py# Smart chunking (reused)
-│       ├── db.py                     # Qdrant init (reused)
-│       ├── retriever.py              # Hybrid retriever (reused)
-│       ├── chatbot.py                # Multi-provider chat (reused, used internally)
-│       ├── session_store.py          # Persistent sessions (reused)
-│       ├── product_manager.py        # Multi-tenant filtering (reused)
-│       ├── llm_client.py             # Thin Azure/AKS wrapper        *** NEW ***
-│       ├── requirements_generator.py # Confluence -> requirements.json *** NEW ***
-│       ├── codebase_analyzer.py      # Codebase -> code_graph.json  *** NEW (queries precomputed graph) ***
-│       ├── hld_generator.py          # -> plan.json + HLD.md         *** NEW ***
-│       └── mermaid_utils.py          # Diagram sanitization/validation *** NEW ***
-├── artifacts/                        # Pipeline outputs (gitignored)
+│       ├── artifact_store/           # Artifact paths, JSONL vector store, embedding/retriever handles
+│       ├── confluence/               # Confluence client, preprocessing, chunking, retrieval
+│       ├── requirements/             # Confluence RAG -> requirements artifacts
+│       ├── codebase/                 # Contract + graph analysis -> code_graph artifacts
+│       ├── hld/                      # HLD generation and validation
+│       ├── mdd/                      # Module catalog, MDD generation, templates, diagrams
+│       └── shared/                   # LLM client, Mermaid utilities, DOCX export
+├── artifacts/                        # Product/release outputs (gitignored)
 ├── requirements.txt
 ├── .env.example                      # Defaults to Azure AI Foundry
 └── README.md
@@ -63,7 +57,7 @@ MDD_NEW/
 ```mermaid
 flowchart LR
     A[Confluence Page URL] --> B[POST /api/ingestion/start]
-    B --> C[(Qdrant)]
+    B --> C[(JSONL vectors)]
     C --> D[POST /api/requirements/generate]
     D --> E[requirements.json]
     G[graph.json static] --> H[POST /api/codebase/analyze]
@@ -72,7 +66,7 @@ flowchart LR
     H --> I[code_graph.json]
     E --> J[POST /api/hld/generate]
     I --> J
-    J --> K[HLD.md]
+    J --> K[HLD md/docx]
 ```
 
 Or run the whole thing with a single call: `POST /api/hld/run`.
@@ -82,7 +76,6 @@ Or run the whole thing with a single call: `POST /api/hld/run`.
 ## Prerequisites
 
 * Python 3.11+
-* Docker (for Qdrant) — or any reachable Qdrant instance
 * Confluence API token + access to the target space/page
 * Azure AI Foundry API key (or your own OpenAI-compatible endpoint)
 
@@ -97,15 +90,12 @@ cd D:\MDD_NEW
 Copy-Item .env.example .env  # then edit credentials
 notepad .env
 
-# 2. Start Qdrant (one-time)
-docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
-
-# 3. Python deps
+# 2. Python deps
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# 4. Run the API
+# 3. Run the API
 cd backend
 python main.py
 # -> http://localhost:8000/docs  (Swagger UI)
@@ -124,7 +114,8 @@ curl -X POST http://localhost:8000/api/ingestion/start \
     "username": "you@example.com",
     "api_token": "<token>",
     "page_id": "1234567890",
-    "product": "myproject"
+    "product": "als",
+    "release": "3.0_release"
   }'
 ```
 Poll status at `GET /api/ingestion/status/{job_id}`.
@@ -133,9 +124,9 @@ Poll status at `GET /api/ingestion/status/{job_id}`.
 ```bash
 curl -X POST http://localhost:8000/api/requirements/generate \
   -H "Content-Type: application/json" \
-  -d '{"product": "myproject", "n_results": 8}'
+  -d '{"product": "als", "release": "3.0_release", "n_results": 8}'
 ```
-Writes `artifacts/requirements_<job>.json` and `artifacts/requirements_latest.json`.
+Writes `artifacts/als/3.0_release/hld/requirements_<timestamp>.json` plus `requirements.json` as the latest alias.
 
 ### 3. Analyze codebase (contract + monolith graph)
 
@@ -144,7 +135,7 @@ Writes `artifacts/requirements_<job>.json` and `artifacts/requirements_latest.js
 ```bash
 curl -X POST http://localhost:8000/api/codebase/analyze \
   -H "Content-Type: application/json" \
-  -d '{"ticket": "AL-27103"}'
+  -d '{"product": "als", "release": "3.0_release", "ticket": "AL-27103"}'
 ```
 
 Or explicitly:
@@ -155,7 +146,7 @@ curl -X POST http://localhost:8000/api/codebase/analyze \
   -d '{"contract_path": "contract_AL-27103.json"}'
 ```
 
-Writes `artifacts/code_graph.json` and `artifacts/codebase_summary.md`.
+Writes `artifacts/als/3.0_release/codebase/code_graph_<timestamp>.json`, `codebase_summary_<timestamp>.md`, and snapshots of `graph.json` / `contract.json`.
 
 > Resolves each `seedSymbols.graphId` in the contract against the monolith
 > graph index, then maps to `requirements.json` from Confluence.
@@ -164,16 +155,15 @@ Writes `artifacts/code_graph.json` and `artifacts/codebase_summary.md`.
 ```bash
 curl -X POST http://localhost:8000/api/hld/generate \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"product": "als", "release": "3.0_release"}'
 ```
-Uses the `_latest.json` artifacts. Returns plan + diagram report. The HLD
-itself is at `artifacts/HLD_latest.md`, retrievable via
-`GET /api/hld/latest`.
+Reads the staged requirements and code graph. Returns plan + diagram report.
+The HLD itself is written as Markdown and DOCX under `artifacts/als/3.0_release/hld/`.
 
 ### 5. Module selection and generate MDDs (optional)
 
-After `HLD.md` exists, use the MDD API to multi-select logical modules and
-generate one SOP-036 MDD markdown per selected module:
+After the HLD exists, use the MDD API to multi-select logical modules and
+generate one SOP-036 MDD Markdown/DOCX pair per selected module:
 
 ```bash
 # 1) List all logical modules (logical_name + target_projects + symbols)
@@ -190,7 +180,7 @@ curl -X POST http://localhost:8000/api/mdd/generate \
 # 3) Last generation metadata
 curl http://localhost:8000/api/mdd/manifest
 
-# 4) Download a module's MDD markdown (module_slug)
+# 4) Download a module's MDD markdown or DOCX (module_slug)
 curl http://localhost:8000/api/mdd/Food_Module
 ```
 

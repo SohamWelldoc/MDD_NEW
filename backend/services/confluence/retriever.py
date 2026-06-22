@@ -1,14 +1,12 @@
 """
 Enhanced Confluence Retriever
 Preserves exact logic from notebook for multi-strategy retrieval and reranking
-Uses Qdrant as vector database
+Uses a JSONL file-backed vector store
 """
 
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
 from sentence_transformers import CrossEncoder, SentenceTransformer
-from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, SearchParams
 from rank_bm25 import BM25Okapi
 import re
 import json
@@ -53,11 +51,11 @@ def sanitize_jira_content(content: str) -> str:
 class EnhancedConfluenceRetriever:
     """
     Enhanced retrieval system for Confluence pages with multiple strategies
-    and reranking for better accuracy. Uses Qdrant as vector database.
+    and reranking for better accuracy. Uses JSONL vector storage.
     """
     
     def __init__(self, 
-                 qdrant_client: QdrantClient,
+                 vector_store,
                  collection_name: str,
                  cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
                  use_bm25: bool = True,
@@ -67,7 +65,8 @@ class EnhancedConfluenceRetriever:
                  query_cache_ttl: int = 1800,
                  chroma_collection=None):
         
-        self.qdrant_client = qdrant_client
+        self.vector_store = vector_store
+        self.qdrant_client = vector_store  # Compatibility name for older call sites.
         self.collection_name = collection_name
         
         # Initialize embedding model
@@ -189,47 +188,16 @@ class EnhancedConfluenceRetriever:
                          filters: Dict = None,
                          product: str = None,
                          use_exact: bool = False) -> List[Dict]:
-        """Initial retrieval using vector similarity with Qdrant"""
+        """Initial retrieval using vector similarity from JSONL embeddings."""
         expanded_query = self._expand_query(query)
         query_vector = self.embedding_model.encode(expanded_query, normalize_embeddings=True).tolist()
-        
-        search_filter = None
-        conditions = []
-        
-        if product:
-            conditions.append(FieldCondition(key="product", match=MatchValue(value=product)))
-        
-        if filters:
-            for key, value in filters.items():
-                conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
-        
-        if conditions:
-            search_filter = Filter(must=conditions)
-        
-        s_params = SearchParams(exact=True) if use_exact else None
-        
-        search_results = self.qdrant_client.query_points(
-            collection_name=self.collection_name,
-            query=query_vector,
+
+        return self.vector_store.search(
+            query_vector=query_vector,
             limit=n_initial,
-            query_filter=search_filter,
-            with_payload=True,
-            search_params=s_params
-        ).points
-        
-        retrieved = []
-        for hit in search_results:
-            similarity_score = hit.score
-            retrieved.append({
-                'id': str(hit.id),
-                'content': hit.payload.get('content', hit.payload.get('text', '')),
-                'metadata': hit.payload,
-                'vector_distance': 1 - similarity_score,
-                'vector_similarity': similarity_score,
-                'combined_score': 0.0
-            })
-        
-        return retrieved
+            product=product,
+            filters=filters,
+        )
 
     def _tokenize(self, text: str) -> List[str]:
         """Simple tokenization for BM25"""
@@ -666,67 +634,49 @@ class EnhancedConfluenceRetriever:
         terms = self._extract_content_keywords(query)
         if not terms:
             return []
-        
+
         results = []
         seen_ids = set()
-        
-        scroll_filter = None
-        if product:
-            scroll_filter = Filter(must=[
-                FieldCondition(key="product", match=MatchValue(value=product))
-            ])
-        
+
         try:
-            offset = None
-            while len(results) < max_results:
-                scroll_result = self.qdrant_client.scroll(
-                    collection_name=self.collection_name,
-                    limit=100,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False,
-                    scroll_filter=scroll_filter
-                )
-                
-                points, next_offset = scroll_result
-                
-                for point in points:
-                    point_id = str(point.id)
-                    if point_id in seen_ids:
-                        continue
-                    
-                    content = point.payload.get('content', point.payload.get('text', '')).lower()
-                    title = get_metadata_field(point.payload, 'title', '').lower()
-                    
-                    title_hit = any(term in title for term in terms)
-                    content_hit = any(term in content for term in terms)
-                    
-                    if title_hit or content_hit:
-                        if title_hit and content_hit:
-                            kw_score = 0.75
-                        elif title_hit:
-                            kw_score = 0.65
-                        else:
-                            kw_score = 0.45
-                        
-                        seen_ids.add(point_id)
-                        results.append({
-                            'id': point_id,
-                            'content': point.payload.get('content', point.payload.get('text', '')),
-                            'metadata': point.payload,
-                            'vector_distance': 1.0 - kw_score,
-                            'vector_similarity': kw_score,
-                            'combined_score': kw_score,
-                            'keyword_match': True
-                        })
-                
-                if next_offset is None:
+            for record in self.vector_store.records():
+                if len(results) >= max_results:
                     break
-                offset = next_offset
-        
+                metadata = record.get("metadata") or {}
+                if product and metadata.get("product") != product:
+                    continue
+                point_id = str(record.get("id"))
+                if point_id in seen_ids:
+                    continue
+
+                content = (record.get("content") or record.get("text") or "").lower()
+                title = get_metadata_field(metadata, 'title', '').lower()
+
+                title_hit = any(term in title for term in terms)
+                content_hit = any(term in content for term in terms)
+
+                if title_hit or content_hit:
+                    if title_hit and content_hit:
+                        kw_score = 0.75
+                    elif title_hit:
+                        kw_score = 0.65
+                    else:
+                        kw_score = 0.45
+
+                    seen_ids.add(point_id)
+                    results.append({
+                        'id': point_id,
+                        'content': record.get("content", ""),
+                        'metadata': metadata,
+                        'vector_distance': 1.0 - kw_score,
+                        'vector_similarity': kw_score,
+                        'combined_score': kw_score,
+                        'keyword_match': True
+                    })
+
         except Exception as e:
             print(f"    Warning: Keyword scroll search failed: {e}")
-        
+
         return results
 
     def ensure_page_diversity(self, results: List[Dict], max_per_page: int = 3) -> List[Dict]:
@@ -854,7 +804,7 @@ class EnhancedConfluenceRetriever:
                 self.cache_misses += 1
         
         strategy = self._get_query_strategy(query)
-        print(f"🔍 Processing query: '{query}' [Strategy: {strategy['query_type']}, Product: {product}]")
+        print(f"[Retrieval] Processing query: '{query}' [Strategy: {strategy['query_type']}, Product: {product}]")
         
         # Adjust initial candidates count based on strategy
         adj_n_initial = max(n_initial, strategy["n_initial"])
@@ -896,39 +846,25 @@ class EnhancedConfluenceRetriever:
                 'removed', 'dropped', 'deferred', 'not included',
             ]
             try:
-                scroll_filter = None
-                if product:
-                    scroll_filter = Filter(must=[FieldCondition(key="product", match=MatchValue(value=product))])
-                neg_offset = None
                 neg_seen = {r['id'] for r in results}
-                while True:
-                    neg_scroll = self.qdrant_client.scroll(
-                        collection_name=self.collection_name,
-                        limit=100,
-                        offset=neg_offset,
-                        with_payload=True,
-                        with_vectors=False,
-                        scroll_filter=scroll_filter
-                    )
-                    neg_points, neg_next_offset = neg_scroll
-                    for pt in neg_points:
-                        pt_id = str(pt.id)
-                        if pt_id not in neg_seen:
-                            title = get_metadata_field(pt.payload, 'title', '').lower()
-                            if any(marker in title for marker in negation_title_markers):
-                                neg_seen.add(pt_id)
-                                results.append({
-                                    'id': pt_id,
-                                    'content': pt.payload.get('content', pt.payload.get('text', '')),
-                                    'metadata': pt.payload,
-                                    'vector_distance': 0.15,
-                                    'vector_similarity': 0.85,
-                                    'combined_score': 0.85,
-                                    'negation_title_match': True
-                                })
-                    if neg_next_offset is None:
-                        break
-                    neg_offset = neg_next_offset
+                for record in self.vector_store.records():
+                    metadata = record.get("metadata") or {}
+                    if product and metadata.get("product") != product:
+                        continue
+                    pt_id = str(record.get("id"))
+                    if pt_id not in neg_seen:
+                        title = get_metadata_field(metadata, 'title', '').lower()
+                        if any(marker in title for marker in negation_title_markers):
+                            neg_seen.add(pt_id)
+                            results.append({
+                                'id': pt_id,
+                                'content': record.get("content") or record.get("text", ""),
+                                'metadata': metadata,
+                                'vector_distance': 0.15,
+                                'vector_similarity': 0.85,
+                                'combined_score': 0.85,
+                                'negation_title_match': True
+                            })
             except Exception as e:
                 print(f"    Warning: Negation title scroll failed: {e}")
                 

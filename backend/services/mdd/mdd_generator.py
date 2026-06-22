@@ -19,8 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .llm_client import get_llm_client
-from .mdd_module_catalog import (
+from services.shared.llm_client import get_llm_client
+from services.mdd.mdd_module_catalog import (
     _extract_hld_section,
     _filter_flows_for_module,
     _find_mapping_for_module,
@@ -31,7 +31,7 @@ from .mdd_module_catalog import (
     get_catalog_module_names,
     load_module_catalog,
 )
-from .mdd_template import (
+from services.mdd.mdd_template import (
     MDD_QUALITY_RULES,
     MDD_SECTION_CONTRACT,
     MDD_SECTIONS,
@@ -41,19 +41,22 @@ from .mdd_template import (
     normalize_mdd_plan,
     slugify_module_name,
 )
-from .mdd_mermaid_builders import (
+from services.mdd.mdd_mermaid_builders import (
     build_architecture_flowchart,
     build_class_diagram,
-    build_sequence_diagram,
-    build_use_case_flowchart,
+    build_data_model_diagram,
+    build_sequence_diagrams,
+    build_use_case_flowcharts,
     resolve_class_name,
 )
-from .mermaid_utils import (
+from services.shared.mermaid_utils import (
     is_valid_mermaid_block,
     postprocess_mermaid,
     sanitize_mermaid_block,
     validate_diagrams,
 )
+from services.artifact_store.artifact_paths import artifact_context
+from services.shared.docx_exporter import markdown_to_docx
 
 
 @dataclass
@@ -64,6 +67,7 @@ class MDDModuleResult:
     plan: Dict[str, Any]
     sections_included: List[str]
     sections_skipped: List[str]
+    docx_path: Optional[str] = None
 
 
 @dataclass
@@ -214,16 +218,11 @@ def generate_mdd_diagrams(
     *,
     temperature: float = 0.2,
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Generate Mermaid diagrams: LLM first (like HLD), sanitize, validate, deterministic fallback."""
+    """Generate Mermaid diagrams deterministically from module evidence."""
     diagrams: Dict[str, str] = {}
     sources: Dict[str, str] = {}
-    allowlist = _allowed_symbols_for_bundle(bundle)
-    module = bundle.get("logical_name", "Module")
-    flows = bundle.get("filtered_flows") or []
     mapping = bundle.get("mapping") or {}
     has_components = bool(mapping.get("codebase_mappings"))
-    context = _diagram_context_block(bundle)
-    hld_sequences = bundle.get("sequence_diagrams") or []
 
     if include.get("module_architecture") and (
         bundle.get("primary_symbols") or bundle.get("target_projects") or has_components
@@ -237,15 +236,13 @@ def generate_mdd_diagrams(
             diagrams["architecture"] = block
             sources["architecture"] = source
 
-    if include.get("use_case_flow") and flows:
-        # Use short numbered edges; full operation signatures are listed in the table below.
-        block, source = _resolve_diagram(
-            llm_block="",
-            fallback_block=build_use_case_flowchart(bundle),
-        )
-        if block:
-            diagrams["use_case"] = block
-            sources["use_case"] = source
+    if include.get("use_case_flow"):
+        for index, (_title, flowchart) in enumerate(build_use_case_flowcharts(bundle), start=1):
+            block = _finalize_diagram_block(flowchart)
+            if block:
+                key = f"use_case_{index}"
+                diagrams[key] = block
+                sources[key] = "deterministic"
 
     if include.get("component_design") and has_components:
         # Deterministic class diagrams preserve valid class names and relationship links.
@@ -258,26 +255,18 @@ def generate_mdd_diagrams(
             sources["class"] = source
 
     if include.get("sequence_flow"):
-        hld_block = hld_sequences[0].strip() if hld_sequences else ""
-        llm_block = ""
-        if flows or has_components:
-            prompt = "\n".join([
-                f"Generate a ```mermaid sequenceDiagram``` for module '{module}'.",
-                "Use exact mapped codebase symbols as participant IDs with aliases.",
-                "Model the primary flow steps as messages between participants.",
-                allowlist,
-                context,
-                "Output only the mermaid fenced block.",
-            ])
-            llm_block = _llm_diagram(llm, prompt, temperature=temperature)
-        block, source = _resolve_diagram(
-            llm_block=llm_block,
-            hld_block=hld_block,
-            fallback_block=build_sequence_diagram(bundle),
-        )
+        for index, (_title, sequence) in enumerate(build_sequence_diagrams(bundle), start=1):
+            block = _finalize_diagram_block(sequence)
+            if block:
+                key = f"sequence_{index}"
+                diagrams[key] = block
+                sources[key] = "deterministic"
+
+    if include.get("data_model_design"):
+        block = _finalize_diagram_block(build_data_model_diagram(bundle))
         if block:
-            diagrams["sequence"] = block
-            sources["sequence"] = source
+            diagrams["data_model"] = block
+            sources["data_model"] = "deterministic"
 
     return diagrams, sources
 
@@ -457,6 +446,146 @@ def _build_component_evidence(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
             evidence.append(normalized)
             seen.add(key.lower())
     return evidence
+
+
+def _normalize_flow(flow: Dict[str, Any], index: int) -> Dict[str, Any]:
+    """Return a stable per-use-case/per-sequence-flow shape for MDD rendering."""
+    steps = []
+    for step_index, step in enumerate(flow.get("step_by_step_sequence") or [], start=1):
+        steps.append({
+            "step_number": step.get("step_number") or step_index,
+            "source_component": step.get("source_component", ""),
+            "destination_component": step.get("destination_component", ""),
+            "operation_signature": step.get("operation_signature", ""),
+            "payload_description": step.get("payload_description", ""),
+            "business_rule": step.get("business_rule") or step.get("rule") or "",
+        })
+    return {
+        "id": f"flow_{index}",
+        "title": flow.get("flow_name") or f"Flow {index}",
+        "description": flow.get("description") or flow.get("summary") or "",
+        "preconditions": flow.get("preconditions") or [],
+        "postconditions": flow.get("postconditions") or [],
+        "alternate_paths": flow.get("alternate_paths") or flow.get("exception_paths") or [],
+        "steps": steps,
+        "source": flow,
+    }
+
+
+def _build_method_details(component_evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in component_evidence:
+        methods = item.get("methods") or []
+        if not methods and item.get("method_name"):
+            methods = [{"display_name": item.get("method_name"), "method": item.get("method_name")}]
+        for method in methods:
+            name = method.get("display_name") or method.get("method") or ""
+            key = "|".join([item.get("class_name", ""), name, item.get("source_file", "")]).lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "class_name": item.get("class_name", ""),
+                "method_name": name,
+                "source_file": item.get("source_file", ""),
+                "mapped_symbol": item.get("normalized_symbol") or item.get("raw_symbol", ""),
+                "impact": item.get("note") or "Participates in the selected module behavior.",
+            })
+    return rows
+
+
+def _build_data_models(component_evidence: List[Dict[str, Any]], mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_model(name: str, kind: str, source_file: str, mapped_symbol: str, notes: str = "") -> None:
+        clean = (name or "").strip()
+        if not clean:
+            return
+        key = clean.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append({
+            "name": clean,
+            "kind": kind,
+            "source_file": source_file,
+            "mapped_symbol": mapped_symbol,
+            "notes": notes or "Structure to be confirmed from implementation evidence.",
+        })
+
+    for item in component_evidence:
+        mapped = item.get("normalized_symbol") or item.get("raw_symbol", "")
+        for dto in item.get("dtos") or []:
+            add_model(str(dto), "DTO / payload", item.get("source_file", ""), mapped)
+        class_name = item.get("class_name", "")
+        if re.search(r"(DTO|Request|Response|Model|Entity|Contract)$", class_name or "", re.IGNORECASE):
+            add_model(class_name, "Class", item.get("source_file", ""), mapped, item.get("note", ""))
+
+    for api in mapping.get("interfaces_and_apis") or []:
+        signature = api.get("signature", "")
+        for token in re.findall(r"\b[A-Z][A-Za-z0-9_]*(?:DTO|Request|Response|Model|Entity|Contract)\b", signature or ""):
+            mappings = api.get("codebase_mappings") or []
+            source = mappings[0].get("source_file", "") if mappings else ""
+            mapped = mappings[0].get("codebase_symbol", "") if mappings else ""
+            add_model(token, "Interface payload", source, mapped, f"Referenced by {api.get('interface_name', 'interface')}.")
+
+    return rows
+
+
+def _build_interface_details(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for api in mapping.get("interfaces_and_apis") or []:
+        mappings = api.get("codebase_mappings") or []
+        first_mapping = mappings[0] if mappings else {}
+        normalized = _normalize_code_symbol(
+            first_mapping.get("codebase_symbol", ""),
+            first_mapping.get("source_file", ""),
+        )
+        rows.append({
+            "interface_name": api.get("interface_name", ""),
+            "protocol_or_type": api.get("protocol_or_type", ""),
+            "signature": api.get("signature", ""),
+            "mapped_symbol": normalized.get("normalized_symbol") or first_mapping.get("codebase_symbol", ""),
+            "source_file": first_mapping.get("source_file", ""),
+            "direction": api.get("direction") or "Input/Output",
+        })
+    return rows
+
+
+def _build_assumptions_and_decisions(
+    architecture_decisions: List[str],
+    component_evidence: List[Dict[str, Any]],
+    data_models: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    rows = [
+        {
+            "type": "Design Decision",
+            "statement": decision,
+            "source": "HLD architecture decisions",
+        }
+        for decision in architecture_decisions
+    ]
+    if not component_evidence:
+        rows.append({
+            "type": "Assumption",
+            "statement": "Implementation classes are not mapped in the current code graph for this module.",
+            "source": "code_graph mapping",
+        })
+    if not data_models:
+        rows.append({
+            "type": "Assumption",
+            "statement": "Detailed DTO/entity fields are to be confirmed because no data model evidence is available.",
+            "source": "code_graph DTO/model evidence",
+        })
+    if not rows:
+        rows.append({
+            "type": "Assumption",
+            "statement": "No additional module-specific assumptions were identified from the current source artifacts.",
+            "source": "requirements/HLD/code_graph",
+        })
+    return rows
 
 
 def _extract_hld_intro(hld_markdown: str) -> Dict[str, Any]:
@@ -663,6 +792,11 @@ def build_module_bundle(
         "interactions_and_flows", []
     )
     filtered_flows = _filter_flows_for_module(all_flows, logical_name, symbols)
+    use_cases = [
+        _normalize_flow(flow, index)
+        for index, flow in enumerate(filtered_flows, start=1)
+    ]
+    sequence_flows = [flow for flow in use_cases if flow.get("steps")]
     hld_excerpt = _extract_hld_section(hld_markdown, logical_name)
     intro = requirements.get("hld_content", {}).get("1_introduction", {})
     seed_resolutions = code_graph.get("seed_resolutions", [])
@@ -719,6 +853,14 @@ def build_module_bundle(
             d for d in arch_decisions
             if "persist" not in d.lower() or any("api" in p.lower() for p in target_projects)
         ]
+    method_details = _build_method_details(component_evidence)
+    data_models = _build_data_models(component_evidence, mapping or {})
+    interface_details = _build_interface_details(mapping or {})
+    assumptions_and_decisions = _build_assumptions_and_decisions(
+        arch_decisions,
+        component_evidence,
+        data_models,
+    )
 
     bundle = {
         "logical_name": logical_name,
@@ -731,12 +873,18 @@ def build_module_bundle(
         "primary_symbols": normalized_symbols or symbols,
         "raw_symbols": symbols,
         "filtered_flows": filtered_flows,
+        "use_cases": use_cases,
+        "sequence_flows": sequence_flows,
         "hld_excerpt": hld_excerpt,
         "hld_intro": intro,
         "architecture_decisions": arch_decisions,
+        "assumptions_and_decisions": assumptions_and_decisions,
         "filtered_acs": filtered_acs,
         "dependencies_in": dependencies_in,
         "dependencies_out": dependencies_out,
+        "method_details": method_details,
+        "data_models": data_models,
+        "interface_details": interface_details,
         "sequence_diagrams": module_diagrams,
     }
     return bundle
@@ -809,18 +957,154 @@ def _render_traceability_table(acs: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _render_assumptions_table(rows: List[Dict[str, str]]) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "| Type | Statement | Source |",
+        "| --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {markdown_table_cell(row.get('type', ''))} "
+            f"| {markdown_table_cell(row.get('statement', ''))} "
+            f"| {markdown_table_cell(row.get('source', ''))} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_method_table(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "| Class | Method | Source File | Mapped Symbol | Design Impact |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| `{row.get('class_name', '') or 'To be confirmed'}` "
+            f"| `{row.get('method_name', '') or 'To be confirmed'}` "
+            f"| `{row.get('source_file', '') or 'external'}` "
+            f"| `{row.get('mapped_symbol', '') or 'To be confirmed'}` "
+            f"| {markdown_table_cell(row.get('impact', ''))} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_data_model_table(rows: List[Dict[str, Any]]) -> str:
+    lines = [
+        "| Data Model | Kind | Source File | Mapped Symbol | Notes |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    if not rows:
+        lines.append("| To be confirmed | To be confirmed | To be confirmed | To be confirmed | No DTO/entity evidence was available in the current code graph. |")
+        return "\n".join(lines)
+    for row in rows:
+        lines.append(
+            f"| `{row.get('name', '')}` "
+            f"| {markdown_table_cell(row.get('kind', ''))} "
+            f"| `{row.get('source_file', '') or 'external'}` "
+            f"| `{row.get('mapped_symbol', '') or 'To be confirmed'}` "
+            f"| {markdown_table_cell(row.get('notes', ''))} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_interface_detail_table(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "| Interface | Direction | Protocol / Type | Signature | Mapped Symbol | Source File |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {markdown_table_cell(row.get('interface_name', '') or 'To be confirmed')} "
+            f"| {markdown_table_cell(row.get('direction', '') or 'Input/Output')} "
+            f"| {markdown_table_cell(row.get('protocol_or_type', '') or 'To be confirmed')} "
+            f"| `{markdown_table_cell(row.get('signature', '') or 'To be confirmed')}` "
+            f"| `{row.get('mapped_symbol', '') or 'To be confirmed'}` "
+            f"| `{row.get('source_file', '') or 'external'}` |"
+        )
+    return "\n".join(lines)
+
+
+def _flow_steps(flow: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return flow.get("steps") or flow.get("step_by_step_sequence") or []
+
+
 def _render_use_case_flow(flows: List[Dict[str, Any]]) -> str:
     if not flows:
         return ""
     lines: List[str] = []
-    for flow in flows:
-        lines.append(f"#### {flow.get('flow_name', 'Flow')}")
-        for step in flow.get("step_by_step_sequence") or []:
+    for index, flow in enumerate(flows, start=1):
+        title = flow.get("title") or flow.get("flow_name") or f"Use Case {index}"
+        lines.append(f"### 3.{index} {title}")
+        description = flow.get("description") or flow.get("summary") or ""
+        if description:
+            lines.append("")
+            lines.append(description)
+        steps = _flow_steps(flow)
+        if steps:
+            lines.extend([
+                "",
+                "| Step | Source | Destination | Operation | Payload / Rule |",
+                "| --- | --- | --- | --- | --- |",
+            ])
+        for step in steps:
             num = step.get("step_number", "")
             src = step.get("source_component", "")
             dst = step.get("destination_component", "")
             op = step.get("operation_signature", "")
-            lines.append(f"{num}. `{src}` → `{dst}` via `{op}`")
+            payload = step.get("payload_description") or step.get("business_rule") or ""
+            lines.append(
+                f"| {num} | `{src}` | `{dst}` | `{op}` | {markdown_table_cell(payload or 'To be confirmed')} |"
+            )
+        alternates = flow.get("alternate_paths") or []
+        if alternates:
+            lines.append("")
+            lines.append("**Alternate / Exception Paths:**")
+            for item in alternates:
+                lines.append(f"- {markdown_table_cell(item)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_sequence_flow_sections(flows: List[Dict[str, Any]], diagrams: Dict[str, str], diagram_sources: Dict[str, str]) -> str:
+    lines = ["## 5 Sequence Flow", "", "### 5.1 Sequence Overview", ""]
+    if not flows:
+        return "\n".join(lines)
+    for index, flow in enumerate(flows, start=1):
+        title = flow.get("title") or flow.get("flow_name") or f"Sequence Flow {index}"
+        lines.append(f"#### 5.1.{index} {title}")
+        lines.append("")
+        steps = _flow_steps(flow)
+        if steps:
+            lines.extend([
+                "| Step | Source | Destination | Message / Operation |",
+                "| --- | --- | --- | --- |",
+            ])
+            for step in steps:
+                lines.append(
+                    f"| {step.get('step_number', '')} "
+                    f"| `{step.get('source_component', '')}` "
+                    f"| `{step.get('destination_component', '')}` "
+                    f"| `{markdown_table_cell(step.get('operation_signature', '') or 'call')}` |"
+                )
+            lines.append("")
+        diagram_key = f"sequence_{index}"
+        if diagrams.get(diagram_key):
+            lines.append(_mermaid_fence(diagrams[diagram_key]))
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _render_data_model_section(bundle: Dict[str, Any], diagrams: Dict[str, str]) -> str:
+    lines = ["## 7 Data Model Design", ""]
+    lines.append(_render_data_model_table(bundle.get("data_models") or []))
+    lines.append("")
+    if diagrams.get("data_model"):
+        lines.append(_mermaid_fence(diagrams["data_model"]))
         lines.append("")
     return "\n".join(lines)
 
@@ -866,6 +1150,12 @@ def _render_section_2(
         lines.append("")
         lines.append(_mermaid_fence(architecture_diagram))
         lines.append("")
+    assumptions = _render_assumptions_table(bundle.get("assumptions_and_decisions") or [])
+    if assumptions:
+        lines.append("### 2.2 Assumptions and Design Decisions Made")
+        lines.append("")
+        lines.append(assumptions)
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -880,6 +1170,12 @@ def _render_section_4(bundle: Dict[str, Any], section_body: str = "") -> str:
         lines.append("### Component Evidence")
         lines.append("")
         lines.append(table)
+        lines.append("")
+    method_table = _render_method_table(bundle.get("method_details") or [])
+    if method_table:
+        lines.append("### Method-Level Design Details")
+        lines.append("")
+        lines.append(method_table)
         lines.append("")
     api_table = _render_api_table(mapping)
     if api_table:
@@ -898,6 +1194,12 @@ def _render_section_6(bundle: Dict[str, Any], section_body: str = "") -> str:
     lines = ["## 6 External System/Module Interface Design", ""]
     if section_body:
         lines.append(section_body)
+        lines.append("")
+    interface_table = _render_interface_detail_table(bundle.get("interface_details") or [])
+    if interface_table:
+        lines.append("### Interface Contract Summary")
+        lines.append("")
+        lines.append(interface_table)
         lines.append("")
     if deps_in:
         lines.extend([
@@ -974,6 +1276,12 @@ def build_mdd_quality_report(
     for item in bundle.get("component_evidence") or []:
         allowed_classes.update(item.get("base_classes") or [])
         allowed_classes.update(item.get("implemented_interfaces") or [])
+    for model in bundle.get("data_models") or []:
+        name = re.sub(r"\W", "_", model.get("name", ""))
+        if name:
+            allowed_classes.add(name)
+    if bundle.get("slug"):
+        allowed_classes.add(bundle["slug"])
     allowed_classes.update({"ControllerBase", "WorkflowBase"})
     declared_classes = set(re.findall(r"^\s*class\s+([A-Za-z_]\w*)", doc, re.MULTILINE))
     unexpected_classes = sorted(
@@ -1014,8 +1322,10 @@ def _planner_prompt(bundle: Dict[str, Any]) -> str:
             "logical_name": bundle.get("logical_name"),
             "target_projects": bundle.get("target_projects"),
             "primary_symbols": bundle.get("primary_symbols"),
-            "flow_count": len(bundle.get("filtered_flows", [])),
+            "flow_count": len(bundle.get("use_cases") or bundle.get("filtered_flows", [])),
             "component_count": len((bundle.get("mapping") or {}).get("codebase_mappings", [])),
+            "method_count": len(bundle.get("method_details") or []),
+            "data_model_count": len(bundle.get("data_models") or []),
             "ac_count": len(bundle.get("filtered_acs", [])),
             "has_dependencies": bool(bundle.get("dependencies_in")),
         }, indent=2),
@@ -1035,7 +1345,11 @@ def _section_context_payload(bundle: Dict[str, Any]) -> Dict[str, Any]:
         },
         "component_evidence": bundle.get("component_evidence") or [],
         "interfaces_and_apis": (bundle.get("mapping") or {}).get("interfaces_and_apis") or [],
-        "flows": bundle.get("filtered_flows") or [],
+        "interfaces": bundle.get("interface_details") or [],
+        "flows": bundle.get("use_cases") or bundle.get("filtered_flows") or [],
+        "methods": bundle.get("method_details") or [],
+        "data_models": bundle.get("data_models") or [],
+        "assumptions_and_decisions": bundle.get("assumptions_and_decisions") or [],
         "dependencies_in": bundle.get("dependencies_in") or [],
         "dependencies_out": bundle.get("dependencies_out") or [],
         "module_relevant_acceptance_criteria": bundle.get("filtered_acs") or [],
@@ -1117,12 +1431,15 @@ def _generate_section_bodies(
     """Generate MDD prose for applicable SOP sections while headings stay fixed."""
     bodies: Dict[str, str] = {}
     for key in (
-        "purpose_and_scope",
+        "purpose",
+        "scope",
         "architecture_overview",
+        "assumptions_design_decisions",
         "use_case_flow",
         "component_design",
         "sequence_overview",
         "external_interfaces",
+        "data_model_design",
     ):
         if include.get(key):
             body = _llm_section_body(llm, key, bundle, temperature=temperature)
@@ -1149,6 +1466,26 @@ def _llm_narrative_prompt(section: str, bundle: Dict[str, Any]) -> str:
     ])
 
 
+def _mdd_figure_captions(bundle: Dict[str, Any], diagrams: Dict[str, str]) -> List[str]:
+    module = bundle.get("logical_name", "Module")
+    captions: List[str] = []
+    if diagrams.get("architecture"):
+        captions.append(f"{module} Module Architecture")
+    for index, flow in enumerate(bundle.get("use_cases") or [], start=1):
+        if diagrams.get(f"use_case_{index}"):
+            title = flow.get("title") or f"Use Case {index}"
+            captions.append(f"{title} Use Case Flow")
+    if diagrams.get("class"):
+        captions.append(f"{module} Component Class Diagram")
+    for index, flow in enumerate(bundle.get("sequence_flows") or bundle.get("use_cases") or [], start=1):
+        if diagrams.get(f"sequence_{index}"):
+            title = flow.get("title") or f"Sequence Flow {index}"
+            captions.append(f"{title} Sequence Flow")
+    if diagrams.get("data_model"):
+        captions.append(f"{module} Data Model Relationships")
+    return captions
+
+
 def _build_mdd_document(
     bundle: Dict[str, Any],
     plan: Dict[str, Any],
@@ -1171,6 +1508,7 @@ def _build_mdd_document(
     )
     plan["diagrams_generated"] = list(diagrams.keys())
     plan["diagram_sources"] = diagram_sources
+    plan["figure_captions"] = _mdd_figure_captions(bundle, diagrams)
     plan["llm_sections_generated"] = list(section_bodies.keys())
 
     cover = [
@@ -1200,8 +1538,10 @@ def _build_mdd_document(
         toc_entries.append("- [5. Sequence Flow](#5-sequence-flow)")
     if include.get("external_interfaces"):
         toc_entries.append("- [6. External System/Module Interface Design](#6-external-systemmodule-interface-design)")
+    if include.get("data_model_design"):
+        toc_entries.append("- [7. Data Model Design](#7-data-model-design)")
     if include.get("annexure"):
-        toc_entries.append("- [7. Annexure](#7-annexure)")
+        toc_entries.append("- [8. Annexure](#8-annexure)")
     cover.extend(toc_entries)
     cover.extend(["", "---", ""])
 
@@ -1209,22 +1549,47 @@ def _build_mdd_document(
 
     if include.get("introduction"):
         intro_parts = ["## 1 Introduction", ""]
-        if include.get("purpose_and_scope"):
-            intro_parts.append("### 1.1 Purpose and Scope")
+        if include.get("purpose"):
+            intro_parts.append("### 1.1 Purpose")
             intro_parts.append("")
             mod = bundle.get("requirements_module") or {}
-            if section_bodies.get("purpose_and_scope"):
-                intro_parts.append(section_bodies["purpose_and_scope"])
+            if section_bodies.get("purpose"):
+                intro_parts.append(section_bodies["purpose"])
             elif mod.get("detailed_responsibility"):
                 intro_parts.append(mod["detailed_responsibility"])
             else:
                 intro_parts.append("To be confirmed.")
             intro_parts.append("")
+        if include.get("target_audience"):
+            intro_parts.append("### 1.2 Target Audience")
+            intro_parts.append("")
+            intro_parts.append("This MDD is intended for software architects, backend engineers, reviewers, QA engineers, and release stakeholders responsible for implementing and verifying the selected module.")
+            intro_parts.append("")
+        if include.get("scope"):
+            intro_parts.append("### 1.3 Scope")
+            intro_parts.append("")
+            if section_bodies.get("scope"):
+                intro_parts.append(section_bodies["scope"])
+            else:
+                mod = bundle.get("requirements_module") or {}
+                caps = mod.get("capabilities") or []
+                if caps:
+                    intro_parts.append("The module scope includes the following capabilities:")
+                    for capability in caps:
+                        intro_parts.append(f"- {capability}")
+                else:
+                    intro_parts.append("To be confirmed.")
+            intro_parts.append("")
         if include.get("definitions"):
-            intro_parts.append("### 1.2 Definitions and Acronyms")
+            intro_parts.append("### 1.4 Definitions and Acronyms")
             intro_parts.append("")
             hld_intro = bundle.get("hld_intro") or {}
-            defs = hld_intro.get("1_2_definitions_and_acronyms") or hld_intro.get("definitions_and_acronyms") or []
+            defs = (
+                hld_intro.get("1_4_definitions_and_acronyms")
+                or hld_intro.get("1_2_definitions_and_acronyms")
+                or hld_intro.get("definitions_and_acronyms")
+                or []
+            )
             if isinstance(defs, list):
                 for d in defs:
                     term = d.get("term") or ""
@@ -1255,46 +1620,18 @@ def _build_mdd_document(
                         if definition:
                             line = f"{line} — {definition}"
                         intro_parts.append(line)
+            if not any(part.startswith("- ") for part in intro_parts[-20:]):
+                intro_parts.append("- To be confirmed.")
             intro_parts.append("")
-        if include.get("references"):
-            intro_parts.append("### 1.3 References")
+        if include.get("conventions"):
+            intro_parts.append("### 1.5 Conventions and Standards Followed")
             intro_parts.append("")
-            hld_intro = bundle.get("hld_intro") or {}
-            refs = hld_intro.get("1_3_references") or hld_intro.get("references") or []
-            if isinstance(refs, list):
-                for r in refs:
-                    title = r.get("title") or ""
-                    url = r.get("url_or_location") or r.get("url") or ""
-                    desc = r.get("relationship_description") or r.get("description") or ""
-                    if not title and not url:
-                        continue
-                    if url and title:
-                        line = f"- [{title}]({url})"
-                    elif title:
-                        line = f"- **{title}**"
-                    else:
-                        line = f"- {url}"
-                    if desc:
-                        line = f"{line} — {desc}"
-                    intro_parts.append(line)
-            elif isinstance(refs, dict):
-                documents = refs.get("documents") or []
-                if isinstance(documents, list):
-                    for r in documents:
-                        title = r.get("title") or ""
-                        url = r.get("url_or_location") or r.get("url") or ""
-                        desc = r.get("relationship_description") or r.get("description") or ""
-                        if not title and not url:
-                            continue
-                        if url and title:
-                            line = f"- [{title}]({url})"
-                        elif title:
-                            line = f"- **{title}**"
-                        else:
-                            line = f"- {url}"
-                        if desc:
-                            line = f"{line} — {desc}"
-                        intro_parts.append(line)
+            intro_parts.extend([
+                "- Requirement identifiers and acceptance criteria are preserved as provided by source artifacts.",
+                "- Code symbols, classes, APIs, DTOs, and source files are taken from `code_graph` evidence only.",
+                "- Missing implementation details are marked as `To be confirmed` instead of inferred.",
+                "- Diagrams are generated from structured module evidence and validated before DOCX export.",
+            ])
             intro_parts.append("")
         sections.append("\n".join(intro_parts))
 
@@ -1306,21 +1643,20 @@ def _build_mdd_document(
         ))
 
     if include.get("use_case_flow"):
-        flow_md = _render_use_case_flow(bundle.get("filtered_flows", []))
-        if flow_md or diagrams.get("use_case") or section_bodies.get("use_case_flow"):
+        flows = bundle.get("use_cases") or bundle.get("filtered_flows", [])
+        flow_md = _render_use_case_flow(flows)
+        if flow_md or section_bodies.get("use_case_flow"):
             uc_parts = ["## 3 Use Case Flow", ""]
             if section_bodies.get("use_case_flow"):
                 uc_parts.append(section_bodies["use_case_flow"])
                 uc_parts.append("")
             if flow_md:
-                uc_parts.append("#### Source Flow Steps")
-                uc_parts.append("")
                 uc_parts.append(flow_md)
-            if diagrams.get("use_case"):
-                uc_parts.append("#### Use case flow diagram")
-                uc_parts.append("")
-                uc_parts.append(_mermaid_fence(diagrams["use_case"]))
-                uc_parts.append("")
+            for index, flow in enumerate(flows, start=1):
+                diagram_key = f"use_case_{index}"
+                if diagrams.get(diagram_key):
+                    uc_parts.append(_mermaid_fence(diagrams[diagram_key]))
+                    uc_parts.append("")
             sections.append("\n".join(uc_parts))
 
     if include.get("component_design"):
@@ -1330,34 +1666,27 @@ def _build_mdd_document(
         sections.append(sec4)
 
     if include.get("sequence_flow"):
-        seq_parts = ["## 5 Sequence Flow", "", "### 5.1 Sequence Overview", ""]
+        seq = _render_sequence_flow_sections(
+            bundle.get("sequence_flows") or bundle.get("use_cases") or [],
+            diagrams,
+            diagram_sources,
+        )
         if section_bodies.get("sequence_overview"):
-            seq_parts.append(section_bodies["sequence_overview"])
-            seq_parts.append("")
-        if diagrams.get("sequence"):
-            source = diagram_sources.get("sequence", "llm")
-            source_label = {
-                "hld": "from HLD",
-                "llm": "LLM-generated",
-                "fallback": "deterministic fallback",
-            }.get(source, source)
-            seq_parts.append(f"#### Sequence diagram ({source_label})")
-            seq_parts.append("")
-            seq_parts.append(_mermaid_fence(diagrams["sequence"]))
-            seq_parts.append("")
-        elif bundle.get("filtered_flows"):
-            seq_parts.append(_render_use_case_flow(bundle["filtered_flows"]))
-        sections.append("\n".join(seq_parts))
+            seq += "\n\n" + section_bodies["sequence_overview"]
+        sections.append(seq)
 
     if include.get("external_interfaces"):
         ext = _render_section_6(bundle, section_bodies.get("external_interfaces", ""))
         if ext:
             sections.append(ext)
 
+    if include.get("data_model_design"):
+        sections.append(_render_data_model_section(bundle, diagrams))
+
     if include.get("annexure") and include.get("traceability"):
         trace = _render_traceability_table(bundle.get("filtered_acs", []))
         if trace:
-            sections.append("## 7 Annexure\n\n### 7.1 Requirements Traceability Matrix\n\n" + trace)
+            sections.append("## 8 Annexure\n\n### 8.1 Requirements Traceability Matrix\n\n" + trace)
 
     body = "\n\n".join(sections)
     return "\n".join(cover) + "\n\n" + body
@@ -1367,6 +1696,8 @@ def generate_mdd_for_modules(
     selected_modules: List[str],
     *,
     ticket: Optional[str] = None,
+    product: Optional[str] = None,
+    release: Optional[str] = None,
     artifact_dir: Optional[str] = None,
     requirements_path: Optional[str] = None,
     hld_path: Optional[str] = None,
@@ -1376,15 +1707,16 @@ def generate_mdd_for_modules(
     """Generate one MDD markdown file per selected logical module."""
     job_id = uuid.uuid4().hex[:8]
     started_at = datetime.utcnow().isoformat()
-    out_dir = artifact_dir or os.getenv("ARTIFACT_DIR", "./artifacts")
-    mdd_dir = os.path.join(out_dir, "mdd")
+    context = artifact_context(product=product, release=release, create=True)
+    out_dir = artifact_dir or str(context.stage_dir("mdd"))
+    mdd_dir = out_dir
     os.makedirs(mdd_dir, exist_ok=True)
 
-    catalog = load_module_catalog(out_dir)
+    catalog = load_module_catalog(out_dir, product=context.product, release=context.release)
     valid_names = get_catalog_module_names(catalog)
     if not valid_names:
-        build_module_catalog(artifact_dir=out_dir)
-        catalog = load_module_catalog(out_dir)
+        build_module_catalog(product=context.product, release=context.release, artifact_dir=out_dir)
+        catalog = load_module_catalog(out_dir, product=context.product, release=context.release)
         valid_names = get_catalog_module_names(catalog)
 
     unknown = [m for m in selected_modules if m not in valid_names]
@@ -1393,13 +1725,15 @@ def generate_mdd_for_modules(
             f"Unknown module(s): {unknown}. Valid modules: {valid_names}"
         )
 
-    req_path = requirements_path or os.path.join(out_dir, "requirements.json")
-    hld_file = hld_path or os.path.join(out_dir, "HLD.md")
-    cg_path = code_graph_path or os.path.join(out_dir, "code_graph.json")
+    hld_dir = context.stage_dir("hld")
+    codebase_dir = context.stage_dir("codebase")
+    req_path = requirements_path or _latest_requirements(hld_dir) or os.path.join(hld_dir, "requirements.json")
+    hld_file = hld_path or _latest_hld_json(hld_dir) or os.path.join(hld_dir, "HLD.json")
+    cg_path = code_graph_path or _latest_code_graph(codebase_dir) or os.path.join(codebase_dir, "code_graph.json")
 
     req_payload = _load_json(req_path)
     requirements = req_payload.get("requirements", req_payload)
-    hld_markdown = Path(hld_file).read_text(encoding="utf-8")
+    hld_markdown = _load_hld_markdown(hld_file)
     cg_payload = _load_json(cg_path)
     code_graph = cg_payload.get("code_graph", cg_payload)
 
@@ -1448,28 +1782,32 @@ def generate_mdd_for_modules(
             )
 
         slug = slugify_module_name(logical_name)
-        plan_path = os.path.join(mdd_dir, f"mdd_plan_{slug}.json")
-        with open(plan_path, "w", encoding="utf-8") as fh:
+        timestamped_plan_path = os.path.join(mdd_dir, f"mdd_plan_{slug}_{context.timestamp}.json")
+        with open(timestamped_plan_path, "w", encoding="utf-8") as fh:
             json.dump(
                 {
                     **plan,
                     "diagram_report": diagram_report,
                     "mdd_quality_report": quality_report,
+                    "mdd_markdown": mdd_clean,
                 },
                 fh,
                 indent=2,
                 ensure_ascii=False,
             )
 
-        out_name = f"MDD_{slug}_{resolved_ticket}.md"
-        out_path = os.path.join(mdd_dir, out_name)
-        with open(out_path, "w", encoding="utf-8") as fh:
-            fh.write(mdd_clean)
+        docx_path = os.path.join(mdd_dir, f"MDD_{slug}_{context.timestamp}.docx")
+        markdown_to_docx(
+            mdd_clean,
+            docx_path,
+            document_title=f"{logical_name} Module Detail Design",
+            figure_captions=plan.get("figure_captions", []),
+        )
 
         generated.append(MDDModuleResult(
             module_name=logical_name,
             slug=slug,
-            artifact_path=out_path,
+            artifact_path=timestamped_plan_path,
             plan={
                 **plan,
                 "diagram_report": diagram_report,
@@ -1477,14 +1815,18 @@ def generate_mdd_for_modules(
             },
             sections_included=plan.get("sections_included", []),
             sections_skipped=plan.get("sections_skipped", []),
+            docx_path=docx_path,
         ))
-        print(f"[MDD Pipeline] Wrote {out_path}")
+        print(f"[MDD Pipeline] Wrote {docx_path}")
 
     completed_at = datetime.utcnow().isoformat()
-    manifest_path = os.path.join(out_dir, "mdd_manifest.json")
+    timestamped_manifest_path = os.path.join(out_dir, f"mdd_manifest_{context.timestamp}.json")
     manifest = {
         "job_id": job_id,
         "ticket": resolved_ticket,
+        "product": context.product,
+        "release": context.release,
+        "timestamp": context.timestamp,
         "started_at": started_at,
         "completed_at": completed_at,
         "selected_modules": selected_modules,
@@ -1494,6 +1836,8 @@ def generate_mdd_for_modules(
                 "module": r.module_name,
                 "slug": r.slug,
                 "path": r.artifact_path,
+                "plan_path": r.artifact_path,
+                "docx_path": r.docx_path,
                 "sections_included": r.sections_included,
                 "sections_skipped": r.sections_skipped,
                 "diagrams_generated": r.plan.get("diagrams_generated", []),
@@ -1505,7 +1849,7 @@ def generate_mdd_for_modules(
             for r in generated
         ],
     }
-    with open(manifest_path, "w", encoding="utf-8") as fh:
+    with open(timestamped_manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, ensure_ascii=False)
 
     return MDDGenerateResult(
@@ -1514,5 +1858,37 @@ def generate_mdd_for_modules(
         started_at=started_at,
         completed_at=completed_at,
         generated=generated,
-        manifest_path=manifest_path,
+        manifest_path=timestamped_manifest_path,
     )
+
+
+def _latest_hld_json(hld_dir: str | Path) -> Optional[str]:
+    root = Path(hld_dir)
+    matches = [path for path in root.glob("*/HLD_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return str(max(matches, key=lambda path: path.stat().st_mtime))
+
+
+def _latest_code_graph(codebase_dir: str | Path) -> Optional[str]:
+    root = Path(codebase_dir)
+    matches = [path for path in root.glob("code_graph_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return str(max(matches, key=lambda path: path.stat().st_mtime))
+
+
+def _latest_requirements(hld_dir: str | Path) -> Optional[str]:
+    root = Path(hld_dir)
+    matches = [path for path in root.glob("requirements_*.json") if path.is_file()]
+    if not matches:
+        return None
+    return str(max(matches, key=lambda path: path.stat().st_mtime))
+
+
+def _load_hld_markdown(hld_json_path: str) -> str:
+    payload = _load_json(hld_json_path)
+    markdown = payload.get("hld_markdown")
+    if not markdown:
+        raise FileNotFoundError(f"hld_markdown not found in {hld_json_path}")
+    return markdown

@@ -2,7 +2,7 @@
 Requirements Generator
 ======================
 
-Turns an already-ingested Confluence corpus (Qdrant collection populated via
+Turns an already-ingested Confluence corpus (JSONL vector files populated via
 `/api/ingestion/start`) into a structured `requirements.json` suitable for
 downstream HLD generation.
 
@@ -28,11 +28,13 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .db import get_qdrant_collection
-from .llm_client import get_llm_client
-from .retriever import EnhancedConfluenceRetriever, format_context, get_metadata_field
+from services.artifact_store.db import get_vector_store
+from services.artifact_store.artifact_paths import artifact_context
+from services.shared.llm_client import get_llm_client
+from services.confluence.retriever import EnhancedConfluenceRetriever, format_context, get_metadata_field
 
 
 # ----------------------------------------------------------------------
@@ -532,6 +534,7 @@ class EvidenceItem:
 class RequirementsResult:
     job_id: str
     product: Optional[str]
+    release: Optional[str]
     started_at: str
     completed_at: str
     requirements: Dict[str, Any]
@@ -940,22 +943,99 @@ def _coerce_json(raw: str) -> Dict[str, Any]:
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
+        raw = raw.strip()
+    if not raw:
+        raise json.JSONDecodeError("LLM response was empty after removing markdown fences", raw, 0)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        m = _JSON_BLOCK_RE.search(raw)
-        if not m:
+        candidate = _extract_first_json_object(raw)
+        if not candidate:
             raise
-        return json.loads(m.group(0))
+        return json.loads(candidate)
+
+
+def _extract_first_json_object(raw: str) -> str:
+    """Return the first balanced JSON object from a noisy LLM response."""
+    start = raw.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(raw)):
+        char = raw[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start:idx + 1]
+    return ""
+
+
+def _chat_json_with_retry(
+    llm,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    label: str,
+) -> Dict[str, Any]:
+    """Call the LLM and retry when it returns empty fences or malformed JSON."""
+    raw = ""
+    prompt = user_prompt
+    for attempt in range(1, 4):
+        raw = llm.chat(
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            temperature=temperature if attempt == 1 else 0.0,
+            max_tokens=max_tokens,
+        )
+        try:
+            return _coerce_json(raw)
+        except Exception as exc:  # noqa: BLE001
+            preview = (raw or "").replace("\n", "\\n")[:300]
+            print(
+                f"[Requirements] {label} JSON parse attempt {attempt}/3 failed: {exc}. "
+                f"Preview: {preview}"
+            )
+            if attempt == 3:
+                raise RuntimeError(
+                    f"LLM did not return valid JSON for {label}: {exc}\n---\n{raw[:1000]}"
+                ) from exc
+            prompt = "\n\n".join(
+                [
+                    user_prompt,
+                    "CRITICAL RETRY INSTRUCTION:",
+                    "Your previous response was not valid JSON. Return exactly one JSON object.",
+                    "Do not use Markdown fences. Do not include explanations. Start with `{` and end with `}`.",
+                    "If a field cannot be populated from evidence, use an empty string, empty list, or empty object matching the schema.",
+                ]
+            )
+
+    raise RuntimeError(f"LLM did not return valid JSON for {label}")
 
 
 def generate_requirements(
     *,
     product: Optional[str] = None,
+    release: Optional[str] = None,
     n_results: int = 12,
     queries: Optional[List[Dict[str, str]]] = None,
     artifact_dir: Optional[str] = None,
-    max_tokens: int = 50000,
+    max_tokens: int = 12000,
     temperature: float = 0.1,
 ) -> RequirementsResult:
     """Run the full requirements-extraction pipeline.
@@ -977,10 +1057,11 @@ def generate_requirements(
     job_id = uuid.uuid4().hex[:8]
     started_at = datetime.utcnow().isoformat()
 
-    qdrant_client, collection_name = get_qdrant_collection()
+    context = artifact_context(product=product, release=release, create=True)
+    vector_store = get_vector_store(project=context.product, release=context.release, create=False)
     retriever = EnhancedConfluenceRetriever(
-        qdrant_client=qdrant_client,
-        collection_name=collection_name,
+        vector_store=vector_store,
+        collection_name="confluence_pages",
         use_bm25=True,
         use_hybrid_search=True,
     )
@@ -1004,52 +1085,46 @@ def generate_requirements(
         partial_reqs: List[Dict[str, Any]] = []
         for part_queries, part_schema in zip(QUERY_SUITE_PARTS, _PARTIAL_SCHEMAS):
             part_evidence = _build_evidence(
-                retriever, part_queries, n_results=n_results, product=product
+                retriever, part_queries, n_results=n_results, product=context.product
             )
             all_evidence.extend(part_evidence)
-            user_prompt = _build_llm_prompt(part_evidence, product, schema=part_schema)
-            raw = llm.chat(
+            user_prompt = _build_llm_prompt(part_evidence, context.product, schema=part_schema)
+            partial_req = _chat_json_with_retry(
+                llm,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                label=f"requirements batch {len(partial_reqs) + 1}",
             )
-            try:
-                partial_req = _coerce_json(raw)
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(
-                    f"LLM did not return valid JSON for batch: {exc}\n---\n{raw[:1000]}"
-                ) from exc
             partial_reqs.append(partial_req)
         requirements = _merge_partial_requirements(partial_reqs)
     else:
         # ── Single-call mode (custom queries) ───────────────────────────────
         all_evidence = _build_evidence(
-            retriever, queries, n_results=n_results, product=product
+            retriever, queries, n_results=n_results, product=context.product
         )
-        user_prompt = _build_llm_prompt(all_evidence, product)
-        raw = llm.chat(
+        user_prompt = _build_llm_prompt(all_evidence, context.product)
+        requirements = _chat_json_with_retry(
+            llm,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
+            label="requirements",
         )
-        try:
-            requirements = _coerce_json(raw)
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                f"LLM did not return valid JSON: {exc}\n---\n{raw[:1000]}"
-            ) from exc
 
     completed_at = datetime.utcnow().isoformat()
 
     # ── Persist artifacts ────────────────────────────────────────────────────
-    out_dir = artifact_dir or os.getenv("ARTIFACT_DIR", "./artifacts")
+    out_dir = artifact_dir or str(context.stage_dir("hld"))
     os.makedirs(out_dir, exist_ok=True)
-    artifact_path = os.path.join(out_dir, "requirements.json")
+    timestamped_artifact_path = os.path.join(out_dir, f"requirements_{context.timestamp}.json")
     payload = {
         "job_id": job_id,
-        "product": product,
+        "product": context.product,
+        "release": context.release,
+        "timestamp": context.timestamp,
         "started_at": started_at,
         "completed_at": completed_at,
         "llm": llm.info(),
@@ -1063,21 +1138,16 @@ def generate_requirements(
             for e in all_evidence
         ],
     }
-    with open(artifact_path, "w", encoding="utf-8") as fh:
+    with open(timestamped_artifact_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
-
-    # Markdown output (single requirements.md file)
-    md_content = _requirements_to_markdown(payload)
-    md_path = os.path.join(out_dir, "requirements.md")
-    with open(md_path, "w", encoding="utf-8") as fh:
-        fh.write(md_content)
 
     return RequirementsResult(
         job_id=job_id,
-        product=product,
+        product=context.product,
+        release=context.release,
         started_at=started_at,
         completed_at=completed_at,
         requirements=requirements,
         evidence=all_evidence,
-        artifact_path=artifact_path,
+        artifact_path=timestamped_artifact_path,
     )

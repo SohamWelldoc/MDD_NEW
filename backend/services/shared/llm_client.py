@@ -102,7 +102,7 @@ class LLMClient:
                     raise RuntimeError("LLM returned an empty response")
                 return res_content
             except Exception as e:
-                print(f"⚠️ LLM call attempt {attempt}/{max_retries} failed: {e}")
+                print(f"[WARN] LLM call attempt {attempt}/{max_retries} failed: {e}")
                 if attempt == max_retries:
                     raise
                 time.sleep(base_delay * (2 ** (attempt - 1)))
