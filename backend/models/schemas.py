@@ -1,7 +1,7 @@
 """Pydantic models for API request/response"""
 
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 from datetime import datetime
 import re
 
@@ -209,6 +209,23 @@ class IngestionResponse(BaseModel):
     job_id: str
     status: str
     message: str
+
+
+class GenerationJobResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+
+
+class GenerationJobStatus(BaseModel):
+    job_id: str
+    status: str  # "pending", "processing", "completed", "failed"
+    progress: int
+    message: Optional[str] = None
+    error: Optional[str] = None
+    started_at: str
+    completed_at: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
 
 
 # Session Models

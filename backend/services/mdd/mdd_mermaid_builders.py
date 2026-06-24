@@ -31,6 +31,19 @@ def _quote_label(text: str) -> str:
     return f'"{t}"'
 
 
+def _short_label(text: str, limit: int = 62) -> str:
+    """Keep Mermaid labels compact enough to read in generated DOCX."""
+    t = re.sub(r"\s+", " ", str(text or "").replace('"', "'")).strip()
+    if len(t) <= limit:
+        return t
+    return t[: limit - 1].rstrip() + "..."
+
+
+def _project_from_source(source_file: str) -> str:
+    path = (source_file or "").replace("\\", "/")
+    return path.split("/")[0] if "/" in path else "Mapped Code"
+
+
 def resolve_class_name(sym: str, source_file: str = "") -> Optional[str]:
     """Map a codebase_symbol (possibly method-only or composite) to a class name."""
     if not sym:
@@ -122,8 +135,142 @@ def _fallback_methods_for_mapping(cb: Dict[str, Any]) -> List[str]:
     return ["..."]
 
 
+def _method_labels(cb: Dict[str, Any], limit: int = 3) -> List[str]:
+    labels = [m for m in _fallback_methods_for_mapping(cb) if m != "..."]
+    deduped: List[str] = []
+    for label in labels:
+        clean = _short_label(label.replace("()", ""), 34)
+        if clean and clean not in deduped:
+            deduped.append(clean)
+        if len(deduped) == limit:
+            break
+    return deduped
+
+
+def _node_label_for_mapping(cb: Dict[str, Any]) -> str:
+    sym = cb.get("codebase_symbol") or cb.get("raw_symbol") or cb.get("normalized_symbol", "")
+    cls = _safe_class_name(cb.get("class_name", "")) or _class_symbol(sym, cb.get("source_file", "")) or "Component"
+    methods = _method_labels(cb, 2)
+    method_text = f"<br/>{', '.join(methods)}" if methods else ""
+    dto_values = cb.get("dtos") or []
+    dto_text = f"<br/>DTO: {_short_label(', '.join(dto_values[:2]), 38)}" if dto_values else ""
+    return _short_label(f"{cls}{method_text}{dto_text}", 88)
+
+
+def _component_class(cb: Dict[str, Any]) -> Optional[str]:
+    sym = cb.get("codebase_symbol") or cb.get("raw_symbol") or cb.get("normalized_symbol", "")
+    return _safe_class_name(cb.get("class_name", "")) or _class_symbol(sym, cb.get("source_file", ""))
+
+
 def build_architecture_flowchart(bundle: Dict[str, Any]) -> str:
-    """§2.1 internal module structure — flowchart TD from mapped symbols."""
+    """§2.1 internal module structure grouped by evidence-derived layer."""
+    mapping = bundle.get("mapping") or {}
+    cbs = bundle.get("component_evidence") or mapping.get("codebase_mappings") or []
+    facts = bundle.get("diagram_facts") or {}
+    if not cbs and not facts.get("components"):
+        return ""
+
+    used: Set[str] = set()
+    lines = ["flowchart LR"]
+    module_id = _safe_id(bundle.get("logical_name", "Module").replace(" ", ""), used)
+    summary = _short_label((bundle.get("requirements_module") or {}).get("detailed_responsibility") or bundle.get("logical_name", ""), 72)
+    lines.append(f"    {module_id}[{_quote_label(bundle.get('logical_name', 'Module') + '<br/>' + summary)}]")
+
+    components = cbs[:]
+    if not components:
+        for comp in facts.get("components") or []:
+            components.append({
+                "class_name": comp.get("class_name") or comp.get("name"),
+                "normalized_symbol": comp.get("name"),
+                "source_file": comp.get("source_file", ""),
+                "methods": [{"display_name": m} for m in comp.get("methods", [])],
+                "dtos": comp.get("dtos", []),
+                "mapping_confidence": comp.get("confidence", ""),
+                "note": comp.get("note", ""),
+            })
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for cb in components[:10]:
+        project = _project_from_source(cb.get("source_file", ""))
+        layer = (facts.get("component_layer_by_name") or {}).get(cb.get("class_name", ""))
+        if not layer:
+            blob = " ".join([cb.get("class_name", ""), cb.get("source_file", ""), cb.get("note", "")]).lower()
+            if "controller" in blob or ".api" in blob:
+                layer = "API"
+            elif "repository" in blob or "mongo" in blob:
+                layer = "Data"
+            elif "integration" in blob or "libre" in blob or "dexcom" in blob:
+                layer = "Integration"
+            elif "dto" in blob:
+                layer = "Contract"
+            else:
+                layer = "Domain"
+        grouped.setdefault(layer, []).append({**cb, "_project": project})
+
+    id_by_cls: Dict[str, str] = {}
+    layer_nodes: Dict[str, str] = {}
+    for layer in ("API", "Domain", "Data", "Integration", "Contract"):
+        layer_items = grouped.get(layer) or []
+        if not layer_items:
+            continue
+        layer_id = _safe_id(f"{layer}Layer", used)
+        layer_nodes[layer] = layer_id
+        lines.append(f"    {layer_id}[{_quote_label(layer + ' layer')}]")
+        lines.append(f"    {module_id} --> {layer_id}")
+        for cb in layer_items[:4]:
+            cls = _component_class(cb)
+            if not cls or cls in id_by_cls:
+                continue
+            nid = _safe_id(cls, used)
+            id_by_cls[cls] = nid
+            project = cb.get("_project") or _project_from_source(cb.get("source_file", ""))
+            confidence = cb.get("mapping_confidence") or cb.get("confidence") or "mapped"
+            label = _node_label_for_mapping(cb)
+            if project:
+                label += f"<br/>{_short_label(project, 32)}"
+            if confidence:
+                label += f"<br/>evidence: {_short_label(confidence, 28)}"
+            lines.append(f"    {nid}[{_quote_label(label)}]")
+            lines.append(f"    {layer_id} --> {nid}")
+
+    relationships = bundle.get("component_relationships") or []
+    for rel in relationships[:10]:
+        src_cls = _safe_class_name(rel.get("source", ""))
+        dst_cls = _safe_class_name(rel.get("target", ""))
+        if src_cls in id_by_cls and dst_cls in id_by_cls:
+            label = _short_label(rel.get("relationship", "calls"), 34)
+            lines.append(f"    {id_by_cls[src_cls]} -->|{_quote_label(label)}| {id_by_cls[dst_cls]}")
+
+    if not relationships:
+        operation_edges = bundle.get("operation_edges") or facts.get("operation_edges") or []
+        for edge in operation_edges[:8]:
+            src_cls = _safe_class_name(resolve_class_name(edge.get("source", "")) or edge.get("source", ""))
+            dst_cls = _safe_class_name(resolve_class_name(edge.get("target", "")) or edge.get("target", ""))
+            if src_cls in id_by_cls and dst_cls in id_by_cls:
+                label = _short_label(edge.get("operation", "call"), 34)
+                lines.append(f"    {id_by_cls[src_cls]} -->|{_quote_label(label)}| {id_by_cls[dst_cls]}")
+
+    for dep in bundle.get("dependencies_in") or []:
+        dep_name = (dep.get("dependency") or "").strip()
+        if not dep_name:
+            continue
+        dep_id = _safe_id(dep_name.replace(" ", ""), used)
+        lines.append(f"    {dep_id}[{_quote_label(dep_name)}]")
+        lines.append(f"    {dep_id} -.-> {module_id}")
+
+    for dep in bundle.get("dependencies_out") or []:
+        dep_name = (dep.get("dependency") or "").strip()
+        if not dep_name:
+            continue
+        dep_id = _safe_id(f"{dep_name}Out", used)
+        lines.append(f"    {dep_id}[{_quote_label(dep_name)}]")
+        lines.append(f"    {module_id} -.-> {dep_id}")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _legacy_architecture_flowchart(bundle: Dict[str, Any]) -> str:
+    """Previous simple chain retained only as a local reference fallback."""
     mapping = bundle.get("mapping") or {}
     cbs = bundle.get("component_evidence") or mapping.get("codebase_mappings") or []
     if not cbs:
@@ -132,19 +279,24 @@ def build_architecture_flowchart(bundle: Dict[str, Any]) -> str:
     used: Set[str] = set()
     id_by_cls: Dict[str, str] = {}
     lines = ["flowchart LR"]
+    module_id = _safe_id(bundle.get("logical_name", "Module").replace(" ", ""), used)
+    summary = _short_label((bundle.get("requirements_module") or {}).get("detailed_responsibility") or bundle.get("logical_name", ""), 72)
+    lines.append(f"    {module_id}[{_quote_label(bundle.get('logical_name', 'Module') + '<br/>' + summary)}]")
 
-    for cb in cbs:
-        sym = cb.get("codebase_symbol") or cb.get("raw_symbol") or cb.get("normalized_symbol", "")
-        cls = _safe_class_name(cb.get("class_name", "")) or _class_symbol(sym, cb.get("source_file", ""))
+    for cb in cbs[:7]:
+        cls = _component_class(cb)
         if not cls or cls in id_by_cls:
             continue
         nid = _safe_id(cls, used)
         id_by_cls[cls] = nid
-        lines.append(f"    {nid}[{_quote_label(cls)}]")
+        project = _project_from_source(cb.get("source_file", ""))
+        lines.append(f"    {nid}[{_quote_label(_node_label_for_mapping(cb) + '<br/>' + _short_label(project, 32))}]")
 
     cls_list = list(id_by_cls.keys())
+    if cls_list:
+        lines.append(f"    {module_id} --> {id_by_cls[cls_list[0]]}")
     for i in range(len(cls_list) - 1):
-        lines.append(f"    {id_by_cls[cls_list[i]]} --> {id_by_cls[cls_list[i + 1]]}")
+        lines.append(f"    {id_by_cls[cls_list[i]]} -->|{_quote_label('mapped interaction')}| {id_by_cls[cls_list[i + 1]]}")
 
     for dep in bundle.get("dependencies_in") or []:
         dep_name = (dep.get("dependency") or "").strip()
@@ -153,7 +305,16 @@ def build_architecture_flowchart(bundle: Dict[str, Any]) -> str:
         dep_id = _safe_id(dep_name.replace(" ", ""), used)
         lines.append(f"    {dep_id}[{_quote_label(dep_name)}]")
         if cls_list:
-            lines.append(f"    {id_by_cls[cls_list[0]]} -.-> {dep_id}")
+            edge = dep.get("codebase_symbol") or "dependency"
+            lines.append(f"    {dep_id} -.->|{_quote_label(_short_label(edge, 34))}| {id_by_cls[cls_list[0]]}")
+
+    for dep in bundle.get("dependencies_out") or []:
+        dep_name = (dep.get("dependency") or "").strip()
+        if not dep_name or not cls_list:
+            continue
+        dep_id = _safe_id(f"{dep_name}Out", used)
+        lines.append(f"    {dep_id}[{_quote_label(dep_name)}]")
+        lines.append(f"    {id_by_cls[cls_list[-1]]} -.-> {dep_id}")
 
     return "\n".join(lines) if len(lines) > 1 else ""
 
@@ -216,7 +377,7 @@ def build_use_case_flowcharts(bundle: Dict[str, Any]) -> List[Tuple[str, str]]:
             src_id = _node(step.get("source_component", "Source"))
             dst_id = _node(step.get("destination_component", "Destination"))
             from_id = prev_dst if prev_dst else src_id
-            label = str(step.get("step_number") or step_number)
+            label = _short_label(step.get("operation_signature") or str(step.get("step_number") or step_number), 48)
             lines.append(f"    {from_id} -->|{_quote_label(label)}| {dst_id}")
             prev_dst = dst_id
         if len(lines) > 1:
@@ -235,17 +396,17 @@ def build_class_diagram(bundle: Dict[str, Any]) -> str:
     declared: Set[str] = set()
     class_order: List[str] = []
 
-    for cb in cbs[:6]:
+    for cb in cbs[:7]:
         sym = cb.get("codebase_symbol") or cb.get("raw_symbol") or cb.get("normalized_symbol", "")
         src = cb.get("source_file", "")
-        cls = _safe_class_name(cb.get("class_name", "")) or _class_symbol(sym, src)
+        cls = _component_class(cb)
         if not cls or cls in declared:
             continue
         declared.add(cls)
         class_order.append(cls)
 
         lines.append(f"    class {cls} {{")
-        for method_name in _fallback_methods_for_mapping(cb):
+        for method_name in _method_labels(cb, 5) or _fallback_methods_for_mapping(cb):
             if method_name == "...":
                 lines.append("        +...")
             else:
@@ -265,9 +426,44 @@ def build_class_diagram(bundle: Dict[str, Any]) -> str:
                     declared.add(bname)
                 lines.append(f"    {cls} --|> {bname}")
 
-    # Add lightweight module-internal usage links so the class diagram is not isolated boxes.
-    for i in range(len(class_order) - 1):
-        lines.append(f"    {class_order[i]} ..> {class_order[i + 1]} : uses")
+        for interface in (cb.get("implemented_interfaces") or [])[:2]:
+            iname = _safe_class_name(interface)
+            if iname:
+                if iname not in declared:
+                    lines.append(f"    class {iname}")
+                    declared.add(iname)
+                lines.append(f"    {cls} ..|> {iname}")
+
+        for dto in (cb.get("dtos") or [])[:2]:
+            dname = _safe_class_name(dto)
+            if dname:
+                if dname not in declared:
+                    lines.append(f"    class {dname}")
+                    declared.add(dname)
+                lines.append(f"    {cls} ..> {dname} : uses DTO")
+
+    relationships = bundle.get("component_relationships") or []
+    added_relationship = False
+    for rel in relationships[:16]:
+        src = _safe_class_name(rel.get("source", ""))
+        dst = _safe_class_name(rel.get("target", ""))
+        if src in declared and dst in declared and src != dst:
+            lines.append(f"    {src} ..> {dst} : {rel.get('relationship') or 'calls'}")
+            added_relationship = True
+
+    if not added_relationship:
+        operation_edges = bundle.get("operation_edges") or (bundle.get("diagram_facts") or {}).get("operation_edges") or []
+        for edge in operation_edges[:10]:
+            src = _safe_class_name(resolve_class_name(edge.get("source", "")) or edge.get("source", ""))
+            dst = _safe_class_name(resolve_class_name(edge.get("target", "")) or edge.get("target", ""))
+            if src in declared and dst in declared and src != dst:
+                lines.append(f"    {src} ..> {dst} : {_short_label(edge.get('operation', 'uses'), 28)}")
+                added_relationship = True
+
+    if not added_relationship:
+        # Last-resort deterministic ordering, only when no relationship evidence exists.
+        for i in range(len(class_order) - 1):
+            lines.append(f"    {class_order[i]} ..> {class_order[i + 1]} : mapped near")
 
     return "\n".join(lines) if len(lines) > 1 else ""
 
@@ -328,6 +524,41 @@ def build_sequence_diagram(bundle: Dict[str, Any]) -> str:
 def build_sequence_diagrams(bundle: Dict[str, Any]) -> List[Tuple[str, str]]:
     """One §5 sequenceDiagram per normalized sequence flow."""
     diagrams: List[Tuple[str, str]] = []
+    operation_edges = bundle.get("operation_edges") or (bundle.get("diagram_facts") or {}).get("operation_edges") or []
+    if operation_edges:
+        used: Set[str] = set()
+        participants_order: List[Tuple[str, str]] = []
+        participants: Dict[str, str] = {}
+        messages: List[str] = []
+
+        def add_participant(name: str) -> str:
+            if name not in participants:
+                pid, alias = _participant_id(name, used)
+                participants[name] = pid
+                participants_order.append((pid, alias.replace('"', "'")))
+            return participants[name]
+
+        for edge in operation_edges[:12]:
+            src = edge.get("source", "")
+            dst = edge.get("target", "")
+            if not src or not dst:
+                continue
+            src_id = add_participant(src)
+            dst_id = add_participant(dst)
+            messages.append(f"    {src_id}->>{dst_id}: {_short_label(edge.get('operation') or 'call', 70)}")
+        if messages:
+            lines = ["sequenceDiagram"]
+            for pid, alias in participants_order:
+                lines.append(f'    participant {pid} as "{alias}"')
+            lines.extend(messages)
+            diagrams.append(("Module Operation Sequence", "\n".join(lines)))
+            return diagrams
+
+    component_chain = [
+        _component_class(cb)
+        for cb in (bundle.get("component_evidence") or (bundle.get("mapping") or {}).get("codebase_mappings") or [])[:4]
+    ]
+    component_chain = [c for index, c in enumerate(component_chain) if c and c not in component_chain[:index]]
     for index, flow in enumerate(bundle.get("sequence_flows") or bundle.get("use_cases") or [], start=1):
         steps = flow.get("steps") or []
         if not steps:
@@ -340,13 +571,16 @@ def build_sequence_diagrams(bundle: Dict[str, Any]) -> List[Tuple[str, str]]:
             src = step.get("source_component", "")
             dst = step.get("destination_component", "")
             op = (step.get("operation_signature") or "call")[:70].replace("\n", " ")
-            for comp in (src, dst):
+            chain = [src] + component_chain + [dst]
+            chain = [comp for idx, comp in enumerate(chain) if comp and comp not in chain[:idx]]
+            for comp in chain:
                 if comp and comp not in participants:
                     pid, alias = _participant_id(comp, used)
                     participants[comp] = pid
                     participants_order.append((pid, alias.replace('"', "'")))
-            if src in participants and dst in participants:
-                messages.append(f"    {participants[src]}->>{participants[dst]}: {op}")
+            for chain_index in range(len(chain) - 1):
+                label = op if chain_index == 0 else "mapped call"
+                messages.append(f"    {participants[chain[chain_index]]}->>{participants[chain[chain_index + 1]]}: {label}")
         if messages:
             lines = ["sequenceDiagram"]
             for pid, alias in participants_order:
@@ -359,7 +593,8 @@ def build_sequence_diagrams(bundle: Dict[str, Any]) -> List[Tuple[str, str]]:
 def build_data_model_diagram(bundle: Dict[str, Any]) -> str:
     """§7 data model relationships from DTO/entity evidence."""
     models = bundle.get("data_models") or []
-    if not models:
+    relationships = bundle.get("data_relationships") or []
+    if not models and not relationships:
         return ""
     lines = ["classDiagram"]
     module_id = _safe_class_name(bundle.get("slug", "") or bundle.get("logical_name", "") or "Module") or "Module"
@@ -371,7 +606,24 @@ def build_data_model_diagram(bundle: Dict[str, Any]) -> str:
             continue
         declared.add(name)
         lines.append(f"    class {name}")
-        lines.append(f"    {module_id} ..> {name} : uses")
+    if relationships:
+        for rel in relationships[:16]:
+            owner = _safe_class_name(resolve_class_name(rel.get("owner", "")) or rel.get("owner", ""))
+            model = _safe_class_name(rel.get("model", ""))
+            if not model:
+                continue
+            if owner and owner not in declared:
+                declared.add(owner)
+                lines.append(f"    class {owner}")
+            if model not in declared:
+                declared.add(model)
+                lines.append(f"    class {model}")
+            lines.append(f"    {owner or module_id} ..> {model} : {_short_label(rel.get('relationship', 'uses'), 28)}")
+    else:
+        for model in models[:10]:
+            name = _safe_class_name(model.get("name", ""))
+            if name:
+                lines.append(f"    {module_id} ..> {name} : uses")
     return "\n".join(lines) if len(lines) > 2 else ""
 
 

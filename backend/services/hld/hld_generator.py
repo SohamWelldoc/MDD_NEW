@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 from services.shared.llm_client import get_llm_client
 from services.shared.mermaid_utils import postprocess_mermaid, validate_diagrams
 from services.hld.hld_validator import validate_hld
+from services.hld.hld_mermaid_builders import build_hld_diagrams
 from services.artifact_store.artifact_paths import artifact_context
 from services.shared.docx_exporter import markdown_to_docx
 
@@ -186,40 +187,92 @@ def _clean_mermaid_label(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").replace('"', "'")).strip()
 
 
+def _short_mermaid_label(value: str, limit: int = 58) -> str:
+    """Keep diagram labels readable while preserving source wording."""
+    label = _clean_mermaid_label(value)
+    if len(label) <= limit:
+        return label
+    return label[: limit - 1].rstrip() + "..."
+
+
+def _class_label(mapping: Dict[str, Any]) -> str:
+    symbol = mapping.get("class_name") or mapping.get("normalized_symbol") or mapping.get("codebase_symbol") or "Component"
+    if "." in symbol and not symbol.startswith("."):
+        symbol = symbol.split(".", 1)[0]
+    if symbol.startswith("."):
+        source_file = mapping.get("source_file") or ""
+        symbol = Path(source_file.replace("\\", "/")).stem or symbol.lstrip(".")
+    methods = []
+    for method in mapping.get("method_impacts") or mapping.get("methods") or []:
+        if isinstance(method, dict):
+            name = method.get("method_name") or method.get("display_name") or method.get("method") or ""
+        else:
+            name = str(method)
+        name = name.strip(".").replace("()", "")
+        if name and name not in methods:
+            methods.append(name)
+        if len(methods) == 2:
+            break
+    method_text = f"<br/>{', '.join(methods)}" if methods else ""
+    return _short_mermaid_label(f"{symbol}{method_text}", 70)
+
+
+def _module_mapping_by_name(code_graph: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    modules = code_graph.get("mapping", {}).get("mapped_modules", []) or []
+    return {str(module.get("module_name", "")).lower(): module for module in modules if module.get("module_name")}
+
+
 def _deterministic_context_diagram(requirements: Dict[str, Any], code_graph: Dict[str, Any]) -> str:
     intro = requirements.get("hld_content", {}).get("1_introduction", {})
     context = intro.get("1_4_context", {}) if isinstance(intro, dict) else {}
     upstream = context.get("upstream_dependencies", []) if isinstance(context, dict) else []
     downstream = context.get("downstream_consumers", []) if isinstance(context, dict) else []
     topic = _document_topic(requirements, {})
+    req_modules = requirements.get("hld_content", {}).get("2_logical_view", {}).get("modules", []) or []
+    mapped_by_name = _module_mapping_by_name(code_graph)
 
     used: set[str] = set()
     system_id = _mermaid_id(topic, used)
-    lines = ["flowchart LR", f'    {system_id}["{_clean_mermaid_label(topic)}"]']
+    lines = [
+        "flowchart LR",
+        f'    {system_id}["{_short_mermaid_label(topic)}<br/>High-Level Design scope"]',
+    ]
 
     for idx, item in enumerate(upstream[:4], start=1):
         name = item.get("system_name") or item.get("name") or f"Upstream {idx}"
         trigger = item.get("trigger_event") or item.get("mechanism") or "provides input"
         node_id = _mermaid_id(name, used)
-        lines.append(f'    {node_id}["{_clean_mermaid_label(name)}"] -->|"{_clean_mermaid_label(trigger)}"| {system_id}')
+        lines.append(f'    {node_id}["{_short_mermaid_label(name)}"] -->|"{_short_mermaid_label(trigger, 36)}"| {system_id}')
+
+    for idx, module in enumerate(req_modules[:4], start=1):
+        name = module.get("module_name") or f"Module {idx}"
+        mod_id = _mermaid_id(name, used)
+        caps = module.get("capabilities") or []
+        cap_label = f"<br/>{_short_mermaid_label(', '.join(caps[:2]), 44)}" if caps else ""
+        lines.append(f'    {system_id} --> {mod_id}["{_short_mermaid_label(name)}{cap_label}"]')
+        mapped_module = mapped_by_name.get(str(name).lower()) or {}
+        for mapping in (mapped_module.get("codebase_mappings") or [])[:3]:
+            class_id = _mermaid_id(mapping.get("normalized_symbol") or mapping.get("codebase_symbol") or "Component", used)
+            lines.append(f'    {mod_id} --> {class_id}["{_class_label(mapping)}"]')
 
     target_projects = code_graph.get("target_projects", []) or []
-    for project in target_projects[:5]:
-        node_id = _mermaid_id(project, used)
-        label = Path(str(project).replace("\\", "/")).name or str(project)
-        lines.append(f'    {system_id} --> {node_id}["{_clean_mermaid_label(label)}"]')
+    if target_projects:
+        project_group = _mermaid_id("Target Projects", used)
+        project_names = ", ".join(Path(str(p).replace("\\", "/")).name for p in target_projects[:4])
+        lines.append(f'    {project_group}["Target projects<br/>{_short_mermaid_label(project_names, 68)}"]')
+        lines.append(f"    {system_id} -.-> {project_group}")
 
     for decision in code_graph.get("resolved_at_checkpoint_b", []) or []:
         if "jsonrepository" in str(decision).lower() or "mongo" in str(decision).lower():
             repo_id = _mermaid_id("JSONRepository Mongo", used)
-            lines.append(f'    {system_id} -->|"{_clean_mermaid_label("persists state")}"| {repo_id}["JSONRepository / Mongo"]')
+            lines.append(f'    {system_id} -->|"{_clean_mermaid_label("persistence decision")}"| {repo_id}["JSONRepository / Mongo"]')
             break
 
     for idx, item in enumerate(downstream[:4], start=1):
         name = item.get("system_name") or item.get("name") or f"Downstream {idx}"
         data = item.get("data_transmitted") or item.get("mechanism") or "consumes output"
         node_id = _mermaid_id(name, used)
-        lines.append(f'    {system_id} -->|"{_clean_mermaid_label(data)}"| {node_id}["{_clean_mermaid_label(name)}"]')
+        lines.append(f'    {system_id} -->|"{_short_mermaid_label(data, 42)}"| {node_id}["{_short_mermaid_label(name)}"]')
 
     if len(lines) == 2:
         lines.append(f'    User["User"] -->|"uses"| {system_id}')
@@ -236,24 +289,35 @@ def _deterministic_sequence_diagram(code_graph: Dict[str, Any]) -> str:
         return ""
 
     used_ids: set[str] = set()
-    participant_by_component: Dict[str, tuple[str, str]] = {}
+    participant_by_label: Dict[str, tuple[str, str]] = {}
 
-    def participant(component: str) -> tuple[str, str]:
-        if component not in participant_by_component:
-            participant_by_component[component] = (_mermaid_id(component, used_ids), component)
-        return participant_by_component[component]
+    def participant(label: str) -> tuple[str, str]:
+        label = _short_mermaid_label(label or "Component", 48)
+        if label not in participant_by_label:
+            participant_by_label[label] = (_mermaid_id(label, used_ids), label)
+        return participant_by_label[label]
 
     messages: List[tuple[str, str, str]] = []
-    for step in steps[:8]:
+    for step in steps[:6]:
         src_component = step.get("source_component") or "Source"
         dst_component = step.get("destination_component") or "Destination"
-        src_id, _src_label = participant(src_component)
-        dst_id, _dst_label = participant(dst_component)
-        operation = _clean_mermaid_label(step.get("operation_signature") or f"{src_component} to {dst_component}")
-        messages.append((src_id, dst_id, operation))
+        mappings = step.get("codebase_mappings") or []
+        mapped_labels = []
+        for mapping in mappings[:4]:
+            label = mapping.get("class_name") or mapping.get("normalized_symbol") or mapping.get("codebase_symbol")
+            if label and label not in mapped_labels:
+                mapped_labels.append(label)
+        chain = [src_component] + mapped_labels + [dst_component]
+        chain = [item for index, item in enumerate(chain) if item and item not in chain[:index]]
+        operation = _short_mermaid_label(step.get("operation_signature") or f"{src_component} to {dst_component}", 70)
+        for index in range(len(chain) - 1):
+            from_id, _ = participant(chain[index])
+            to_id, _ = participant(chain[index + 1])
+            label = operation if index == 0 else "mapped call"
+            messages.append((from_id, to_id, label))
 
     lines = ["sequenceDiagram"]
-    for pid, label in participant_by_component.values():
+    for pid, label in participant_by_label.values():
         lines.append(f'    participant {pid} as "{_clean_mermaid_label(label)}"')
     for src_id, dst_id, operation in messages:
         lines.append(f"    {src_id}->>{dst_id}: {operation}")
@@ -296,6 +360,100 @@ def _replace_mermaid_blocks_with_deterministic(
     return updated
 
 
+def _mermaid_fence(block: str) -> str:
+    return "```mermaid\n" + block.strip() + "\n```" if block and block.strip() else ""
+
+
+def _strip_mermaid_blocks(markdown: str) -> str:
+    """Remove LLM-authored Mermaid so final diagrams are deterministic builders only."""
+    return re.sub(r"\n?```mermaid\s*\n.*?```\n?", "\n\n", markdown, flags=re.DOTALL)
+
+
+def _insert_after_heading(markdown: str, heading_pattern: str, content: str) -> str:
+    if not content.strip():
+        return markdown
+    match = re.search(heading_pattern, markdown, flags=re.IGNORECASE | re.MULTILINE)
+    if not match:
+        return markdown + "\n\n" + content.strip() + "\n"
+    insert_at = match.end()
+    return markdown[:insert_at] + "\n\n" + content.strip() + "\n" + markdown[insert_at:]
+
+
+def _insert_before_section(markdown: str, section_pattern: str, content: str) -> str:
+    if not content.strip():
+        return markdown
+    match = re.search(section_pattern, markdown, flags=re.IGNORECASE | re.MULTILINE)
+    if not match:
+        return markdown + "\n\n" + content.strip() + "\n"
+    insert_at = match.start()
+    return markdown[:insert_at].rstrip() + "\n\n" + content.strip() + "\n\n" + markdown[insert_at:]
+
+
+def _insert_deterministic_hld_diagrams(
+    markdown: str,
+    requirements: Dict[str, Any],
+    code_graph: Dict[str, Any],
+    plan: Dict[str, Any],
+) -> tuple[str, Dict[str, Any]]:
+    diagrams, facts = build_hld_diagrams(requirements, code_graph, plan)
+    clean = _strip_mermaid_blocks(markdown)
+
+    context_block = ""
+    if diagrams.get("hld_context"):
+        context_block = "\n\n".join([
+            "#### System Context Diagram",
+            "This diagram shows the feature boundary, external inputs/outputs, target projects, and major implementation layers.",
+            _mermaid_fence(diagrams["hld_context"]),
+        ])
+    clean = _insert_after_heading(clean, r"^###\s+1\.4\s+Context[^\n]*", context_block)
+
+    logical_blocks: List[str] = []
+    if diagrams.get("hld_feature_flow"):
+        logical_blocks.extend([
+            "### 2.1 Feature Architecture Flow",
+            "This diagram explains the end-to-end movement from trigger to outcome using mapped components and contract evidence.",
+            _mermaid_fence(diagrams["hld_feature_flow"]),
+        ])
+    if diagrams.get("hld_primary_sequence"):
+        logical_blocks.extend([
+            "### 2.2 Primary Interaction Sequence",
+            "This diagram shows the primary runtime interaction order between mapped participants.",
+            _mermaid_fence(diagrams["hld_primary_sequence"]),
+        ])
+    if diagrams.get("hld_lifecycle"):
+        logical_blocks.extend([
+            "### 2.3 Feature Lifecycle",
+            "This diagram highlights time-based behavior, eligibility, materialization, and display states found in requirements or contract evidence.",
+            _mermaid_fence(diagrams["hld_lifecycle"]),
+        ])
+    if diagrams.get("hld_decision_view"):
+        logical_blocks.extend([
+            "### 2.4 Architecture Decisions and Evidence",
+            "This diagram summarizes fixed architecture decisions and unresolved areas that influence implementation.",
+            _mermaid_fence(diagrams["hld_decision_view"]),
+        ])
+    logical_block = "\n\n".join(block for block in logical_blocks if block)
+    clean = _insert_after_heading(clean, r"^##\s+2\s+Logical View[^\n]*", logical_block)
+
+    infra_block = ""
+    if diagrams.get("hld_infrastructure"):
+        infra_block = "\n\n".join([
+            "### 5.5 Infrastructure Topology Diagram",
+            "This diagram is limited to target projects and infrastructure/persistence decisions found in source artifacts.",
+            _mermaid_fence(diagrams["hld_infrastructure"]),
+        ])
+        clean = _insert_after_heading(clean, r"^##\s+5\s+Infrastructure View[^\n]*", infra_block)
+
+    if logical_block and "## 2 Logical View" not in clean:
+        clean = _insert_before_section(clean, r"^##\s+3\b", "## 2 Logical View\n\n" + logical_block)
+
+    return clean, {
+        "sources": {key: "deterministic" for key in diagrams},
+        "coverage": facts.get("coverage", {}),
+        "diagram_names": list(diagrams.keys()),
+    }
+
+
 def _normalize_plan(
     plan: Dict[str, Any],
     requirements: Dict[str, Any],
@@ -303,6 +461,8 @@ def _normalize_plan(
 ) -> Dict[str, Any]:
     """Apply deterministic rules after LLM planner. NFR sections follow requirements only."""
     include = plan.setdefault("include_sections", {})
+    include["introduction"] = True
+    include["logical_view"] = True
 
     nfr = _nfr_include_flags(requirements)
     include["security"] = nfr["security"]
@@ -761,11 +921,92 @@ def _render_architecture_decisions(code_graph: Dict[str, Any]) -> str:
     lines = [
         "### 2.0 Architecture Decisions (Checkpoint B)",
         "",
-        "The following decisions are fixed from the feature contract and MUST appear verbatim:",
+        "The following decisions are fixed from the feature contract. Each row explains why the decision matters to this HLD and where it is grounded.",
         "",
+        "| Decision | Source | Design Impact |",
+        "| --- | --- | --- |",
     ]
     for d in decisions:
-        lines.append(f"- {d}")
+        decision = _markdown_table_cell(str(d))
+        impact = _markdown_table_cell(_decision_impact(str(d)))
+        lines.append(f"| {decision} | Feature contract / Checkpoint B | {impact} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _decision_impact(decision: str) -> str:
+    text = decision.lower()
+    if "persist" in text or "mongo" in text or "repository" in text:
+        return "Defines the persistence boundary and prevents the HLD from assuming an unrelated data store."
+    if "compute" in text or "background" in text or "timer" in text:
+        return "Defines when the feature behavior is evaluated and whether background processing is required."
+    if "reuse" in text or "do not reuse" in text or "new" in text:
+        return "Defines whether implementation should extend existing behavior or introduce a new capability."
+    if "api" in text or "dto" in text or "contract" in text:
+        return "Defines the public contract or integration surface affected by the feature."
+    return "Constrains the logical architecture and implementation approach for this feature."
+
+
+def _render_hld_evidence_summary(requirements: Dict[str, Any], code_graph: Dict[str, Any]) -> str:
+    """Deterministic evidence summary so reviewers understand grounding quality."""
+    mapping = code_graph.get("mapping", {})
+    mapped_modules = mapping.get("mapped_modules", []) or []
+    mapped_flows = mapping.get("mapped_flows", []) or []
+    seed_resolutions = code_graph.get("seed_resolutions", []) or []
+    resolved = [s for s in seed_resolutions if s.get("resolved")]
+    new_caps = [s for s in seed_resolutions if s.get("is_new_capability") or s.get("relation") == "new"]
+    acs = code_graph.get("acceptance_criteria", []) or []
+    target_projects = code_graph.get("target_projects", []) or []
+    req_modules = requirements.get("hld_content", {}).get("2_logical_view", {}).get("modules", []) or []
+
+    lines = [
+        "### 2.0.1 Evidence and Confidence Summary",
+        "",
+        "This section summarizes the source evidence used by the HLD so confirmed behavior, inferred mappings, and new capability areas are visible to reviewers.",
+        "",
+        "| Evidence Area | Count / Status | HLD Usage |",
+        "| --- | --- | --- |",
+        f"| Contract target projects | {len(target_projects)} | Defines component/project boundaries. |",
+        f"| Resolved seed symbols | {len(resolved)} of {len(seed_resolutions)} | Grounds existing classes, methods, and APIs. |",
+        f"| New capability seeds | {len(new_caps)} | Identifies behavior not yet represented as existing code. |",
+        f"| Requirements modules | {len(req_modules)} | Provides logical feature decomposition. |",
+        f"| Mapped code modules | {len(mapped_modules)} | Connects logical modules to implementation symbols. |",
+        f"| Mapped flows | {len(mapped_flows)} | Grounds sequence and interaction diagrams. |",
+        f"| Acceptance criteria | {len(acs)} | Grounds traceability and testable behavior. |",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _render_open_questions_and_gaps(code_graph: Dict[str, Any]) -> str:
+    unresolved = code_graph.get("unresolved", []) or []
+    seed_resolutions = code_graph.get("seed_resolutions", []) or []
+    unmapped = [
+        s for s in seed_resolutions
+        if not s.get("resolved") and not s.get("is_new_capability") and s.get("name")
+    ]
+    if not unresolved and not unmapped:
+        return ""
+
+    lines = [
+        "### 2.0.2 Open Questions and To Be Confirmed",
+        "",
+        "The following items should be confirmed before detailed implementation. They are listed explicitly so the HLD does not hide assumptions in generic prose.",
+        "",
+        "| Item | Source | Impact |",
+        "| --- | --- | --- |",
+    ]
+    for item in unresolved:
+        text = item.get("question") if isinstance(item, dict) else str(item)
+        if text:
+            lines.append(
+                f"| { _markdown_table_cell(text) } | Feature contract unresolved list | Confirm before final MDD or implementation. |"
+            )
+    for seed in unmapped:
+        name = _markdown_table_cell(seed.get("name", ""))
+        lines.append(
+            f"| {name} | Contract seed not resolved in code graph | Treat as not mapped until code evidence is available. |"
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -1372,10 +1613,16 @@ def generate_hld(
         )
         # Prepend deterministic contract subsections
         arch_decisions = _render_architecture_decisions(code_graph)
+        evidence_summary = _render_hld_evidence_summary(requirements, code_graph)
+        open_questions = _render_open_questions_and_gaps(code_graph)
         traceability = _render_traceability_table(code_graph)
         logical_parts = ["## 2 Logical View"]
         if arch_decisions:
             logical_parts.append(arch_decisions)
+        if evidence_summary:
+            logical_parts.append(evidence_summary)
+        if open_questions:
+            logical_parts.append(open_questions)
         # Strip duplicate heading if LLM included it
         body = logical_raw.strip()
         if body.startswith("## 2"):
@@ -1465,9 +1712,16 @@ def generate_hld(
 
     # ---- Pass 2: sanitize + validate diagrams --------------------------
     hld_clean = postprocess_mermaid(hld_raw)
-    hld_clean = _replace_mermaid_blocks_with_deterministic(hld_clean, requirements, code_graph)
+    hld_clean, hld_diagram_meta = _insert_deterministic_hld_diagrams(
+        hld_clean,
+        requirements,
+        code_graph,
+        plan,
+    )
+    hld_clean = postprocess_mermaid(hld_clean)
 
     diagram_report = validate_diagrams(hld_clean)
+    diagram_report.update(hld_diagram_meta)
     accuracy_report = validate_hld(hld_clean, code_graph, requirements=requirements)
 
     # ---- Pass 3: persist -----------------------------------------------

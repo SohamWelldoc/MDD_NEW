@@ -55,6 +55,7 @@ from services.shared.mermaid_utils import (
     sanitize_mermaid_block,
     validate_diagrams,
 )
+from services.shared.diagram_facts import build_diagram_facts
 from services.artifact_store.artifact_paths import artifact_context
 from services.shared.docx_exporter import markdown_to_docx
 
@@ -534,6 +535,90 @@ def _build_data_models(component_evidence: List[Dict[str, Any]], mapping: Dict[s
     return rows
 
 
+def _build_component_relationships(component_evidence: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Caller/callee edges available from code_graph component evidence."""
+    rows: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    class_by_symbol = {
+        (item.get("normalized_symbol") or item.get("raw_symbol") or "").lower(): item.get("class_name", "")
+        for item in component_evidence
+    }
+
+    def label_for(raw: Any) -> str:
+        if isinstance(raw, dict):
+            value = raw.get("normalized_symbol") or raw.get("codebase_symbol") or raw.get("symbol") or raw.get("name") or ""
+        else:
+            value = str(raw or "")
+        return class_by_symbol.get(value.lower()) or resolve_class_name(value) or value
+
+    for item in component_evidence:
+        source = item.get("class_name") or item.get("normalized_symbol") or item.get("raw_symbol") or ""
+        for caller in item.get("callers") or []:
+            src = label_for(caller)
+            key = f"{src}|{source}|calls".lower()
+            if src and source and src != source and key not in seen:
+                seen.add(key)
+                rows.append({
+                    "source": src,
+                    "target": source,
+                    "relationship": "calls",
+                    "evidence": "component.callers",
+                })
+        for callee in item.get("callees") or []:
+            dst = label_for(callee)
+            key = f"{source}|{dst}|calls".lower()
+            if source and dst and source != dst and key not in seen:
+                seen.add(key)
+                rows.append({
+                    "source": source,
+                    "target": dst,
+                    "relationship": "calls",
+                    "evidence": "component.callees",
+                })
+    return sorted(rows, key=lambda row: (row["source"].lower(), row["target"].lower()))[:24]
+
+
+def _build_data_relationships(
+    component_evidence: List[Dict[str, Any]],
+    data_models: List[Dict[str, Any]],
+    interface_details: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """DTO/payload relationships for module data model diagrams."""
+    rows: List[Dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(owner: str, model: str, relation: str, evidence: str) -> None:
+        owner = (owner or "").strip()
+        model = (model or "").strip()
+        if not owner or not model:
+            return
+        key = f"{owner}|{model}|{relation}".lower()
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append({
+            "owner": owner,
+            "model": model,
+            "relationship": relation,
+            "evidence": evidence,
+        })
+
+    known_models = {model.get("name", "") for model in data_models if model.get("name")}
+    for item in component_evidence:
+        owner = item.get("class_name") or item.get("normalized_symbol") or item.get("raw_symbol") or ""
+        for dto in item.get("dtos") or []:
+            add(owner, dto, "uses DTO", "component.dtos")
+    for iface in interface_details:
+        signature = iface.get("signature", "")
+        owner = iface.get("mapped_symbol") or iface.get("interface_name") or ""
+        for token in re.findall(r"\b[A-Z][A-Za-z0-9_]*(?:DTO|Request|Response|Model|Entity|Contract)\b", signature or ""):
+            add(owner, token, "interface payload", "interface.signature")
+    if not rows:
+        for model in sorted(known_models):
+            add("Module", model, "uses", "data_models")
+    return rows[:30]
+
+
 def _build_interface_details(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for api in mapping.get("interfaces_and_apis") or []:
@@ -856,6 +941,25 @@ def build_module_bundle(
     method_details = _build_method_details(component_evidence)
     data_models = _build_data_models(component_evidence, mapping or {})
     interface_details = _build_interface_details(mapping or {})
+    component_relationships = _build_component_relationships(component_evidence)
+    data_relationships = _build_data_relationships(
+        component_evidence,
+        data_models,
+        interface_details,
+    )
+    diagram_facts = build_diagram_facts(
+        requirements,
+        code_graph,
+        module_name=logical_name,
+        module_bundle={
+            "primary_symbols": normalized_symbols or symbols,
+            "raw_symbols": symbols,
+            "component_evidence": component_evidence,
+            "mapping": mapping or {},
+            "use_cases": use_cases,
+            "sequence_flows": sequence_flows,
+        },
+    )
     assumptions_and_decisions = _build_assumptions_and_decisions(
         arch_decisions,
         component_evidence,
@@ -884,6 +988,11 @@ def build_module_bundle(
         "dependencies_out": dependencies_out,
         "method_details": method_details,
         "data_models": data_models,
+        "component_relationships": component_relationships,
+        "data_relationships": data_relationships,
+        "diagram_facts": diagram_facts,
+        "operation_edges": diagram_facts.get("operation_edges", []),
+        "diagram_coverage": diagram_facts.get("coverage", {}),
         "interface_details": interface_details,
         "sequence_diagrams": module_diagrams,
     }
@@ -1029,6 +1138,121 @@ def _render_interface_detail_table(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _render_module_evidence_summary(bundle: Dict[str, Any]) -> str:
+    coverage = bundle.get("diagram_coverage") or {}
+    lines = [
+        "| Evidence Area | Count / Status | MDD Usage |",
+        "| --- | --- | --- |",
+        f"| Component evidence | {len(bundle.get('component_evidence') or [])} | Grounds classes, methods, and source files. |",
+        f"| Method details | {len(bundle.get('method_details') or [])} | Grounds implementation responsibilities. |",
+        f"| Interfaces/APIs | {len(bundle.get('interface_details') or [])} | Grounds external and module contracts. |",
+        f"| Data models/DTOs | {len(bundle.get('data_models') or [])} | Grounds payload and data handling design. |",
+        f"| Operation edges | {len(bundle.get('operation_edges') or []) or coverage.get('edge_count', 0)} | Grounds module call/sequence behavior. |",
+        f"| Acceptance criteria | {len(bundle.get('filtered_acs') or [])} | Grounds testable module responsibilities. |",
+    ]
+    return "\n".join(lines)
+
+
+def _render_component_relationship_table(rows: List[Dict[str, str]]) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "| Source Component | Relationship | Target Component | Evidence |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| `{row.get('source', '')}` "
+            f"| {markdown_table_cell(row.get('relationship', ''))} "
+            f"| `{row.get('target', '')}` "
+            f"| {markdown_table_cell(row.get('evidence', ''))} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_operation_edges_table(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "| Source | Target | Operation | Payload / Rule | Evidence |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in rows[:20]:
+        lines.append(
+            f"| `{row.get('source', '')}` "
+            f"| `{row.get('target', '')}` "
+            f"| `{markdown_table_cell(row.get('operation', '') or 'call')}` "
+            f"| {markdown_table_cell(row.get('payload', '') or 'To be confirmed')} "
+            f"| {markdown_table_cell(row.get('evidence', '') or row.get('confidence', ''))} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_data_relationship_table(rows: List[Dict[str, str]]) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "| Owner / API / Class | Data Model | Relationship | Evidence |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| `{row.get('owner', '')}` "
+            f"| `{row.get('model', '')}` "
+            f"| {markdown_table_cell(row.get('relationship', ''))} "
+            f"| {markdown_table_cell(row.get('evidence', ''))} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_edge_case_table(bundle: Dict[str, Any]) -> str:
+    rows: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    keywords = ("delete", "update", "fail", "error", "exception", "eligib", "no data", "missing", "suppress", "inactive")
+    for flow in bundle.get("use_cases") or bundle.get("filtered_flows") or []:
+        title = flow.get("title") or flow.get("flow_name") or "Flow"
+        for item in flow.get("alternate_paths") or flow.get("exception_paths") or []:
+            key = str(item).lower()
+            if key not in seen:
+                seen.add(key)
+                rows.append({"scenario": str(item), "source": title, "handling": "Defined by flow alternate/exception path."})
+        for step in _flow_steps(flow):
+            blob = " ".join(str(step.get(k, "")) for k in ("operation_signature", "payload_description", "business_rule"))
+            if any(k in blob.lower() for k in keywords):
+                key = blob.lower()
+                if key not in seen:
+                    seen.add(key)
+                    rows.append({
+                        "scenario": blob,
+                        "source": title,
+                        "handling": "Apply the mapped business rule in the module flow.",
+                    })
+    for ac in bundle.get("filtered_acs") or []:
+        text = ac.get("text", "")
+        if any(k in text.lower() for k in keywords):
+            key = text.lower()
+            if key not in seen:
+                seen.add(key)
+                rows.append({
+                    "scenario": text,
+                    "source": ac.get("id", "Acceptance criterion"),
+                    "handling": "Must be covered by implementation and tests for this module.",
+                })
+    if not rows:
+        return ""
+    lines = [
+        "| Scenario / Edge Case | Source | Required Handling |",
+        "| --- | --- | --- |",
+    ]
+    for row in rows[:12]:
+        lines.append(
+            f"| {markdown_table_cell(row.get('scenario', ''))} "
+            f"| {markdown_table_cell(row.get('source', ''))} "
+            f"| {markdown_table_cell(row.get('handling', ''))} |"
+        )
+    return "\n".join(lines)
+
+
 def _flow_steps(flow: Dict[str, Any]) -> List[Dict[str, Any]]:
     return flow.get("steps") or flow.get("step_by_step_sequence") or []
 
@@ -1103,6 +1327,12 @@ def _render_data_model_section(bundle: Dict[str, Any], diagrams: Dict[str, str])
     lines = ["## 7 Data Model Design", ""]
     lines.append(_render_data_model_table(bundle.get("data_models") or []))
     lines.append("")
+    data_relationships = _render_data_relationship_table(bundle.get("data_relationships") or [])
+    if data_relationships:
+        lines.append("### 7.1 Data Ownership and Payload Usage")
+        lines.append("")
+        lines.append(data_relationships)
+        lines.append("")
     if diagrams.get("data_model"):
         lines.append(_mermaid_fence(diagrams["data_model"]))
         lines.append("")
@@ -1133,6 +1363,12 @@ def _render_section_2(
         lines.append("**Related Target Projects (C#):**")
         for p in bundle["target_projects"]:
             lines.append(f"- {p}")
+        lines.append("")
+    evidence_summary = _render_module_evidence_summary(bundle)
+    if evidence_summary:
+        lines.append("### 2.1.1 Module Evidence Summary")
+        lines.append("")
+        lines.append(evidence_summary)
         lines.append("")
     caps = mod.get("capabilities") or []
     if caps:
@@ -1176,6 +1412,18 @@ def _render_section_4(bundle: Dict[str, Any], section_body: str = "") -> str:
         lines.append("### Method-Level Design Details")
         lines.append("")
         lines.append(method_table)
+        lines.append("")
+    relationship_table = _render_component_relationship_table(bundle.get("component_relationships") or [])
+    if relationship_table:
+        lines.append("### Component Relationships")
+        lines.append("")
+        lines.append(relationship_table)
+        lines.append("")
+    operation_table = _render_operation_edges_table(bundle.get("operation_edges") or [])
+    if operation_table:
+        lines.append("### Operation and Payload Flow")
+        lines.append("")
+        lines.append(operation_table)
         lines.append("")
     api_table = _render_api_table(mapping)
     if api_table:
@@ -1263,8 +1511,16 @@ def build_mdd_quality_report(
         warnings.append("potential_unsourced_infrastructure_reference")
     if include.get("component_design") and not bundle.get("component_evidence"):
         warnings.append("component_design_without_component_evidence")
+    if include.get("component_design") and not bundle.get("component_relationships") and not bundle.get("operation_edges"):
+        warnings.append("component_design_without_relationship_or_operation_edges")
+    if include.get("sequence_flow") and not bundle.get("operation_edges") and not bundle.get("sequence_flows"):
+        warnings.append("sequence_flow_without_operation_evidence")
+    if include.get("data_model_design") and bundle.get("data_models") and not bundle.get("data_relationships"):
+        warnings.append("data_models_without_ownership_relationships")
     if include.get("traceability") and not bundle.get("filtered_acs"):
         warnings.append("traceability_enabled_without_module_acs")
+    if include.get("use_case_flow") and not _render_edge_case_table(bundle):
+        warnings.append("use_case_flow_without_explicit_edge_cases")
     if diagram_report.get("invalid", 0):
         warnings.append("invalid_mermaid_diagrams")
 
@@ -1304,6 +1560,8 @@ def build_mdd_quality_report(
         "diagram_report": diagram_report,
         "llm_sections_generated": llm_sections,
         "component_evidence_count": len(bundle.get("component_evidence") or []),
+        "operation_edge_count": len(bundle.get("operation_edges") or []),
+        "data_relationship_count": len(bundle.get("data_relationships") or []),
         "traceability_count": len(bundle.get("filtered_acs") or []),
         "quality_rules": MDD_QUALITY_RULES,
     }
@@ -1349,6 +1607,10 @@ def _section_context_payload(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "flows": bundle.get("use_cases") or bundle.get("filtered_flows") or [],
         "methods": bundle.get("method_details") or [],
         "data_models": bundle.get("data_models") or [],
+        "operation_edges": bundle.get("operation_edges") or [],
+        "component_relationships": bundle.get("component_relationships") or [],
+        "data_relationships": bundle.get("data_relationships") or [],
+        "diagram_coverage": bundle.get("diagram_coverage") or {},
         "assumptions_and_decisions": bundle.get("assumptions_and_decisions") or [],
         "dependencies_in": bundle.get("dependencies_in") or [],
         "dependencies_out": bundle.get("dependencies_out") or [],
@@ -1652,6 +1914,14 @@ def _build_mdd_document(
                 uc_parts.append("")
             if flow_md:
                 uc_parts.append(flow_md)
+            edge_cases = _render_edge_case_table(bundle)
+            if edge_cases:
+                uc_parts.extend([
+                    "### 3.x Exception and Edge-Case Handling",
+                    "",
+                    edge_cases,
+                    "",
+                ])
             for index, flow in enumerate(flows, start=1):
                 diagram_key = f"use_case_{index}"
                 if diagrams.get(diagram_key):

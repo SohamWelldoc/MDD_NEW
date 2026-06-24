@@ -369,6 +369,16 @@
       }
     }
 
+    async function pollGeneration(statusPath, jobId, label) {
+      while (true) {
+        const status = await api(`${statusPath}/${jobId}`);
+        setStatus(`${label} ${status.status}: ${status.progress}%\n${status.message || ""}`);
+        if (status.status === "completed") return status.result;
+        if (status.status === "failed") throw new Error(status.error || `${label} generation failed.`);
+        await new Promise(resolve => setTimeout(resolve, 2500));
+      }
+    }
+
     async function generateHld() {
       setBusy(true);
       showPanel("hld");
@@ -450,10 +460,11 @@
         }
 
         setStatus("Generating HLD DOCX and JSON...");
-        const hld = await api("/api/hld/generate", {
+        const hldJob = await api("/api/hld/generate", {
           method: "POST",
           body: JSON.stringify({ product: state.product, release: state.release })
         });
+        const hld = await pollGeneration("/api/hld/status", hldJob.job_id, "HLD");
         state.hldDocxPath = hld.artifact_paths.docx || "";
         await refreshHldPreview();
         renderHldDownloads();
@@ -524,7 +535,7 @@
       setBusy(true);
       setStatus(`Generating MDD for ${selected.join(", ")}...`);
       try {
-        const result = await api("/api/mdd/generate", {
+        const mddJob = await api("/api/mdd/generate", {
           method: "POST",
           body: JSON.stringify({
             selected_modules: selected,
@@ -533,6 +544,7 @@
             ticket: state.ticket
           })
         });
+        const result = await pollGeneration("/api/mdd/status", mddJob.job_id, "MDD");
         state.generatedMdd = result.generated || [];
         renderMdd(result);
         showPanel("mdd");

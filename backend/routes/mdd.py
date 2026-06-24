@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, Response
 
 from models.schemas import (
+    GenerationJobResponse,
+    GenerationJobStatus,
     MDDGenerateRequest,
-    MDDGenerateResponse,
     MDDModuleCatalogResponse,
 )
 from services.mdd.mdd_generator import generate_mdd_for_modules
@@ -20,6 +23,7 @@ from services.mdd.mdd_module_catalog import build_module_catalog, load_module_ca
 from services.artifact_store.artifact_paths import artifact_context
 
 router = APIRouter()
+mdd_jobs: Dict[str, Dict[str, Any]] = {}
 
 
 def _artifact_dir(product: str = None, release: str = None) -> str:
@@ -63,6 +67,61 @@ def _to_catalog_response(catalog: Dict[str, Any]) -> MDDModuleCatalogResponse:
     )
 
 
+def _mdd_result_payload(result) -> Dict[str, Any]:
+    return {
+        "job_id": result.job_id,
+        "ticket": result.ticket,
+        "started_at": result.started_at,
+        "completed_at": result.completed_at,
+        "generated": [
+            {
+                "module": r.module_name,
+                "slug": r.slug,
+                "path": r.artifact_path,
+                "plan_path": r.artifact_path,
+                "docx_path": r.docx_path,
+                "sections_included": r.sections_included,
+                "sections_skipped": r.sections_skipped,
+            }
+            for r in result.generated
+        ],
+        "manifest_path": result.manifest_path,
+    }
+
+
+def _run_mdd_job(job_id: str, request: MDDGenerateRequest) -> None:
+    job = mdd_jobs[job_id]
+    try:
+        job.update(
+            status="processing",
+            progress=10,
+            message=f"Generating MDD for {len(request.selected_modules)} selected module(s)...",
+        )
+        artifact_dir = _artifact_dir(request.product, request.release)
+        result = generate_mdd_for_modules(
+            selected_modules=request.selected_modules,
+            ticket=request.ticket,
+            product=request.product,
+            release=request.release,
+            artifact_dir=artifact_dir,
+        )
+        job.update(
+            status="completed",
+            progress=100,
+            message="MDD generated successfully.",
+            completed_at=datetime.now().isoformat(),
+            result=_mdd_result_payload(result),
+        )
+    except Exception as exc:  # noqa: BLE001
+        job.update(
+            status="failed",
+            progress=100,
+            message="MDD generation failed.",
+            error=str(exc),
+            completed_at=datetime.now().isoformat(),
+        )
+
+
 @router.get("/modules", response_model=MDDModuleCatalogResponse)
 async def get_modules(product: str = None, release: str = None) -> MDDModuleCatalogResponse:
     """Return the module catalog for MDD selection."""
@@ -96,44 +155,32 @@ async def refresh_modules(product: str = None, release: str = None) -> MDDModule
     return _to_catalog_response(catalog)
 
 
-@router.post("/generate", response_model=MDDGenerateResponse)
-async def generate_mdd(request: MDDGenerateRequest) -> MDDGenerateResponse:
-    """Generate one MDD markdown file per selected module."""
-    artifact_dir = _artifact_dir(request.product, request.release)
-    try:
-        result = generate_mdd_for_modules(
-            selected_modules=request.selected_modules,
-            ticket=request.ticket,
-            product=request.product,
-            release=request.release,
-            artifact_dir=artifact_dir,
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    return MDDGenerateResponse(
-        job_id=result.job_id,
-        ticket=result.ticket,
-        started_at=result.started_at,
-        completed_at=result.completed_at,
-        generated=[
-            {
-                "module": r.module_name,
-                "slug": r.slug,
-                "path": r.artifact_path,
-                "plan_path": r.artifact_path,
-                "docx_path": r.docx_path,
-                "sections_included": r.sections_included,
-                "sections_skipped": r.sections_skipped,
-            }
-            for r in result.generated
-        ],
-        manifest_path=result.manifest_path,
+@router.post("/generate", response_model=GenerationJobResponse)
+async def generate_mdd(request: MDDGenerateRequest, background_tasks: BackgroundTasks) -> GenerationJobResponse:
+    """Start one MDD generation job for the selected modules."""
+    job_id = str(uuid.uuid4())
+    mdd_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "pending",
+        "progress": 0,
+        "message": "MDD generation queued.",
+        "started_at": datetime.now().isoformat(),
+    }
+    background_tasks.add_task(_run_mdd_job, job_id, request)
+    return GenerationJobResponse(
+        job_id=job_id,
+        status="started",
+        message="MDD generation started.",
     )
+
+
+@router.get("/status/{job_id}", response_model=GenerationJobStatus)
+async def get_mdd_status(job_id: str) -> GenerationJobStatus:
+    """Return status for a background MDD generation job."""
+    job = mdd_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return GenerationJobStatus(**job)
 
 
 @router.get("/manifest")

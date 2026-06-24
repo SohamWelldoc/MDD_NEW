@@ -28,6 +28,37 @@ _FILLER_PHRASES = (
 )
 
 
+def _diagram_metrics(block: str) -> Dict[str, int]:
+    first_line = block.strip().splitlines()[0].strip() if block.strip() else ""
+    if first_line.startswith("sequenceDiagram"):
+        return {
+            "participants": len(set(re.findall(r"^\s*participant\s+(\S+)", block, re.MULTILINE))),
+            "messages": len(re.findall(r"^\s*\S+\s*->>\s*\S+\s*:", block, re.MULTILINE)),
+        }
+    if first_line.startswith("classDiagram"):
+        return {
+            "classes": len(set(re.findall(r"^\s*class\s+([A-Za-z_]\w*)", block, re.MULTILINE))),
+            "relationships": len(re.findall(r"^\s*[A-Za-z_]\w*\s+(?:--|\.\.|<\|)", block, re.MULTILINE)),
+        }
+    if first_line.startswith("flowchart") or first_line.startswith("graph"):
+        nodes: Set[str] = set()
+        edges = 0
+        for line in block.splitlines()[1:]:
+            edge = re.search(r"^\s*([A-Za-z0-9_]+).*?(?:-->|-\.->|---|==>)", line)
+            if edge:
+                nodes.add(edge.group(1))
+                edges += 1
+                target = re.search(r"(?:-->|-\.->|---|==>)(?:\|.*?\|)?\s*([A-Za-z0-9_]+)", line)
+                if target:
+                    nodes.add(target.group(1))
+                continue
+            node = re.match(r"^\s*([A-Za-z0-9_]+)\s*(?:\[|\(|\{)", line)
+            if node:
+                nodes.add(node.group(1))
+        return {"nodes": len(nodes), "edges": edges}
+    return {}
+
+
 def _collect_allowed_symbols(code_graph: Dict[str, Any]) -> Set[str]:
     allowed: Set[str] = set()
     for res in code_graph.get("seed_resolutions", []):
@@ -153,6 +184,28 @@ def validate_hld(
                 })
                 break
 
+    # --- Content quality gates for generated HLD usefulness ---
+    expected_headings = (
+        "Evidence and Confidence Summary",
+        "Requirements Traceability",
+    )
+    for heading in expected_headings:
+        if heading not in hld_markdown:
+            warnings.append({
+                "type": "missing_quality_section",
+                "message": f"HLD is missing quality section: {heading}",
+            })
+    if code_graph.get("resolved_at_checkpoint_b") and "| Decision | Source | Design Impact |" not in hld_markdown:
+        warnings.append({
+            "type": "weak_decision_section",
+            "message": "Architecture decisions are present but not rendered with source/impact detail",
+        })
+    if code_graph.get("acceptance_criteria") and "Mapped Code Symbol" not in hld_markdown:
+        warnings.append({
+            "type": "weak_traceability",
+            "message": "Acceptance criteria are present but code traceability is missing",
+        })
+
     # --- Mermaid semantic checks ---
     for idx, block in enumerate(_MERMAID_BLOCK_RE.findall(hld_markdown), start=1):
         first_line = block.strip().splitlines()[0].strip() if block.strip() else ""
@@ -163,6 +216,7 @@ def validate_hld(
                     "message": f"Diagram {idx}: 'participant' used inside flowchart",
                 })
         if first_line.startswith("sequenceDiagram"):
+            declared = set(re.findall(r"^\s*participant\s+(\S+)", block, re.MULTILINE))
             for ln in block.splitlines()[1:]:
                 ln = ln.strip()
                 if not ln or ln.startswith("participant"):
@@ -173,6 +227,32 @@ def validate_hld(
                         "type": "mermaid_semantic",
                         "message": f"Diagram {idx}: sequence participant '{arrow.group(1)}' has spaces/hyphens",
                     })
+                if arrow and arrow.group(1) not in declared:
+                    warnings.append({
+                        "type": "mermaid_grounding",
+                        "message": f"Diagram {idx}: sequence source participant '{arrow.group(1)}' is not declared",
+                    })
+                target = re.match(r"^\S+\s*->>\s*(\S+)\s*:", ln)
+                if target and target.group(1) not in declared:
+                    warnings.append({
+                        "type": "mermaid_grounding",
+                        "message": f"Diagram {idx}: sequence target participant '{target.group(1)}' is not declared",
+                    })
+        metrics = _diagram_metrics(block)
+        if first_line.startswith("sequenceDiagram") and (
+            metrics.get("participants", 0) < 2 or metrics.get("messages", 0) < 1
+        ):
+            warnings.append({
+                "type": "shallow_diagram",
+                "message": f"Diagram {idx}: sequence diagram is too shallow for HLD review",
+            })
+        if (first_line.startswith("flowchart") or first_line.startswith("graph")) and (
+            metrics.get("nodes", 0) < 3 or metrics.get("edges", 0) < 2
+        ):
+            warnings.append({
+                "type": "shallow_diagram",
+                "message": f"Diagram {idx}: flowchart is too shallow for HLD review",
+            })
 
     return {
         "valid": len(issues) == 0,

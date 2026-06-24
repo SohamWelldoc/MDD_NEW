@@ -2,12 +2,17 @@
 
 import json
 import os
+import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from models.schemas import (
+    GenerationJobResponse,
+    GenerationJobStatus,
     HLDGenerationRequest,
     HLDGenerationResponse,
     PipelineRunRequest,
@@ -21,32 +26,77 @@ from services.requirements.requirements_generator import generate_requirements
 from services.artifact_store.artifact_paths import artifact_context
 
 router = APIRouter()
+hld_jobs: Dict[str, Dict[str, Any]] = {}
 
 
-@router.post("/generate", response_model=HLDGenerationResponse)
-async def generate(request: HLDGenerationRequest) -> HLDGenerationResponse:
-    """Generate HLD from the latest (or supplied) requirements + code_graph artifacts."""
+def _hld_result_payload(result) -> Dict[str, Any]:
+    return {
+        "job_id": result.job_id,
+        "plan": result.plan,
+        "diagram_report": result.diagram_report,
+        "artifact_paths": result.artifact_paths,
+        "started_at": result.started_at,
+        "completed_at": result.completed_at,
+    }
+
+
+def _run_hld_job(job_id: str, request: HLDGenerationRequest) -> None:
+    job = hld_jobs[job_id]
     try:
+        job.update(
+            status="processing",
+            progress=10,
+            message="Generating HLD document. This can take several minutes...",
+        )
         result = generate_hld(
             product=request.product,
             release=request.release,
             requirements_path=request.requirements_path,
             code_graph_path=request.code_graph_path,
         )
-        return HLDGenerationResponse(
-            job_id=result.job_id,
-            plan=result.plan,
-            diagram_report=result.diagram_report,
-            artifact_paths=result.artifact_paths,
-            started_at=result.started_at,
-            completed_at=result.completed_at,
+        job.update(
+            status="completed",
+            progress=100,
+            message="HLD generated successfully.",
+            completed_at=datetime.now().isoformat(),
+            result=_hld_result_payload(result),
         )
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc))
+        job.update(
+            status="failed",
+            progress=100,
+            message="HLD generation failed.",
+            error=str(exc),
+            completed_at=datetime.now().isoformat(),
+        )
+
+
+@router.post("/generate", response_model=GenerationJobResponse)
+async def generate(request: HLDGenerationRequest, background_tasks: BackgroundTasks) -> GenerationJobResponse:
+    """Start HLD generation from the latest (or supplied) requirements + code_graph artifacts."""
+    job_id = str(uuid.uuid4())
+    hld_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "pending",
+        "progress": 0,
+        "message": "HLD generation queued.",
+        "started_at": datetime.now().isoformat(),
+    }
+    background_tasks.add_task(_run_hld_job, job_id, request)
+    return GenerationJobResponse(
+        job_id=job_id,
+        status="started",
+        message="HLD generation started.",
+    )
+
+
+@router.get("/status/{job_id}", response_model=GenerationJobStatus)
+async def get_hld_status(job_id: str) -> GenerationJobStatus:
+    """Return status for a background HLD generation job."""
+    job = hld_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return GenerationJobStatus(**job)
 
 
 @router.get("/latest", response_class=PlainTextResponse)

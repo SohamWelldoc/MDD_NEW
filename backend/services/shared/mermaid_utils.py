@@ -180,12 +180,60 @@ def _semantic_issues(block: str) -> List[str]:
     return issues
 
 
+def _diagram_metrics(block: str) -> Dict[str, int]:
+    body = block.strip()
+    if not body:
+        return {}
+    first_line = body.splitlines()[0].strip()
+    if first_line.startswith("sequenceDiagram"):
+        participants = set(re.findall(r"^\s*participant\s+(\S+)", body, re.MULTILINE))
+        messages = re.findall(r"^\s*\S+\s*->>\s*\S+\s*:", body, re.MULTILINE)
+        return {"participants": len(participants), "messages": len(messages)}
+    if first_line.startswith("classDiagram"):
+        classes = set(re.findall(r"^\s*class\s+([A-Za-z_]\w*)", body, re.MULTILINE))
+        relationships = re.findall(r"^\s*[A-Za-z_]\w*\s+(?:--|<\|--|\.\.|--\|>|<\.\.)", body, re.MULTILINE)
+        return {"classes": len(classes), "relationships": len(relationships)}
+    if first_line.startswith("flowchart") or first_line.startswith("graph"):
+        node_ids = set()
+        edge_count = 0
+        for line in body.splitlines()[1:]:
+            edge_match = re.search(r"^\s*([A-Za-z0-9_]+).*?(?:-->|-\.->|---|==>)", line)
+            if edge_match:
+                node_ids.add(edge_match.group(1))
+                edge_count += 1
+                target = re.search(r"(?:-->|-\.->|---|==>)(?:\|.*?\|)?\s*([A-Za-z0-9_]+)", line)
+                if target:
+                    node_ids.add(target.group(1))
+                continue
+            node_match = re.match(r"^\s*([A-Za-z0-9_]+)\s*(?:\[|\(|\{)", line)
+            if node_match:
+                node_ids.add(node_match.group(1))
+        return {"nodes": len(node_ids), "edges": edge_count}
+    return {}
+
+
+def _shallow_warnings(block: str, metrics: Dict[str, int]) -> List[str]:
+    first_line = block.strip().splitlines()[0].strip() if block.strip() else ""
+    warnings: List[str] = []
+    if first_line.startswith("sequenceDiagram"):
+        if metrics.get("participants", 0) < 2 or metrics.get("messages", 0) < 1:
+            warnings.append("sequenceDiagram is too shallow to explain an interaction")
+    elif first_line.startswith("classDiagram"):
+        if metrics.get("classes", 0) < 2:
+            warnings.append("classDiagram has fewer than two classes")
+    elif first_line.startswith("flowchart") or first_line.startswith("graph"):
+        if metrics.get("nodes", 0) < 3 or metrics.get("edges", 0) < 2:
+            warnings.append("flowchart is too shallow to explain architecture or flow")
+    return warnings
+
+
 def _validate_block(block: str) -> Dict[str, object]:
     issues: List[str] = []
+    warnings: List[str] = []
     body = block.strip()
 
     if not body:
-        return {"valid": False, "issues": ["empty block"]}
+        return {"valid": False, "issues": ["empty block"], "warnings": warnings, "metrics": {}}
 
     first_token = body.split(None, 1)[0]
     if first_token not in _VALID_DIAGRAM_TYPES:
@@ -197,8 +245,10 @@ def _validate_block(block: str) -> Dict[str, object]:
             issues.append(f"unbalanced '{opener}{closer}'")
 
     issues.extend(_semantic_issues(body))
+    metrics = _diagram_metrics(body)
+    warnings.extend(_shallow_warnings(body, metrics))
 
-    return {"valid": not issues, "issues": issues}
+    return {"valid": not issues, "issues": issues, "warnings": warnings, "metrics": metrics}
 
 
 def validate_diagrams(doc: str) -> Dict[str, object]:
@@ -206,10 +256,13 @@ def validate_diagrams(doc: str) -> Dict[str, object]:
     blocks = _MERMAID_BLOCK_RE.findall(doc)
     reports = [_validate_block(b) for b in blocks]
     valid = sum(1 for r in reports if r["valid"])
+    warnings = sum(len(r.get("warnings", [])) for r in reports)
     return {
         "total": len(reports),
         "valid": valid,
         "invalid": len(reports) - valid,
+        "warnings": warnings,
+        "shallow": sum(1 for r in reports if r.get("warnings")),
         "details": reports,
     }
 
