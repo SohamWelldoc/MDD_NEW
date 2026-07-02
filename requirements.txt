@@ -10,8 +10,6 @@ pydantic-settings==2.1.0
 # Confluence API
 atlassian-python-api==3.41.0
 
-# Qdrant
-qdrant-client>=1.16.0
 httpx==0.24.1
 
 # Sentence Transformers dependencies (torch installed separately as CPU-only)

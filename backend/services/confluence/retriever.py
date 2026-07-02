@@ -62,11 +62,9 @@ class EnhancedConfluenceRetriever:
                  use_hybrid_search: bool = True,
                  enable_cache: bool = False,
                  query_cache_size: int = 1000,
-                 query_cache_ttl: int = 1800,
-                 chroma_collection=None):
+                 query_cache_ttl: int = 1800):
         
         self.vector_store = vector_store
-        self.qdrant_client = vector_store  # Compatibility name for older call sites.
         self.collection_name = collection_name
         
         # Initialize embedding model

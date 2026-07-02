@@ -55,7 +55,7 @@
     }
     .card-body { padding: 20px; }
     label { display: block; font-weight: 650; margin: 14px 0 7px; }
-    input, textarea {
+    input, textarea, select {
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -142,6 +142,11 @@
       padding: 14px;
       background: #fff;
     }
+    .module.affected {
+      border-color: #f59e0b;
+      background: #fffbeb;
+      box-shadow: 0 10px 24px rgba(245, 158, 11, 0.12);
+    }
     .module label { margin: 0; display: flex; gap: 10px; align-items: flex-start; }
     .module input { width: auto; margin-top: 4px; }
     .pill {
@@ -153,12 +158,95 @@
       font-size: 12px;
       margin: 8px 6px 0 0;
     }
+    .pill.warn { background: #fef3c7; color: #92400e; }
+    .impact-reasons {
+      display: block;
+      margin-top: 8px;
+      color: #92400e;
+      font-size: 12px;
+      line-height: 1.4;
+    }
     .downloads a {
       display: inline-block;
       margin: 8px 10px 0 0;
       color: var(--brand);
       font-weight: 700;
       text-decoration: none;
+    }
+    .review-box {
+      margin-top: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fbfdff;
+      padding: 16px;
+    }
+    .review-box h4 { margin: 0 0 10px; }
+    .review-box textarea { min-height: 110px; font-family: "Segoe UI", Arial, sans-serif; }
+    .diff {
+      margin-top: 12px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #0f172a;
+      color: #e5e7eb;
+      overflow: auto;
+      max-height: 320px;
+      font: 12px/1.45 Consolas, monospace;
+      white-space: pre;
+    }
+    .side-diff {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .side-diff pre {
+      margin: 0;
+      min-height: 140px;
+      max-height: 320px;
+      overflow: auto;
+      white-space: pre-wrap;
+      background: #f8fafc;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .review-meta {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 10px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+      white-space: pre-wrap;
+    }
+    .review-meta.working {
+      color: var(--warn);
+      background: #fff7ed;
+      border-color: #fed7aa;
+    }
+    .review-warning {
+      margin-top: 10px;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #f59e0b;
+      background: #fffbeb;
+      color: #92400e;
+      font-size: 13px;
+      white-space: pre-wrap;
+    }
+    .review-warning.hidden { display: none; }
+    .review-section-heading {
+      cursor: pointer;
+      border-radius: 6px;
+      padding: 2px 4px;
+    }
+    .review-section-heading:hover,
+    .review-section-heading.selected {
+      background: #e0f2fe;
+      color: #075985;
     }
     .small { color: var(--muted); font-size: 13px; }
     .hidden { display: none; }
@@ -187,27 +275,37 @@
         <h2>Demo Inputs</h2>
         <div class="card-body">
           <label for="confluenceUrl">Confluence Page URL</label>
-          <input id="confluenceUrl" placeholder="https://welldoc.atlassian.net/wiki/spaces/.../pages/..." />
+          <input id="confluenceUrl" list="confluenceUrlHistory" placeholder="https://welldoc.atlassian.net/wiki/spaces/.../pages/..." />
+          <datalist id="confluenceUrlHistory"></datalist>
 
           <div class="row">
             <div style="flex: 1">
               <label for="product">Product</label>
-              <input id="product" placeholder="optional, inferred if blank" />
+              <input id="product" list="productHistory" placeholder="optional, inferred if blank" />
+              <datalist id="productHistory"></datalist>
             </div>
             <div style="flex: 1">
               <label for="release">Release</label>
-              <input id="release" placeholder="optional, inferred if blank" />
+              <input id="release" list="releaseHistory" placeholder="optional, inferred if blank" />
+              <datalist id="releaseHistory"></datalist>
             </div>
           </div>
 
           <label for="ticket">Ticket / Contract ID</label>
-          <input id="ticket" placeholder="e.g. AL-27103" />
+          <input id="ticket" list="ticketHistory" placeholder="e.g. AL-27103" />
+          <datalist id="ticketHistory"></datalist>
 
           <label for="contractFile">Contract JSON File</label>
           <input id="contractFile" type="file" accept=".json,application/json" />
 
           <label for="contractJson">Or Paste Contract JSON</label>
           <textarea id="contractJson" placeholder="{ ... }"></textarea>
+          <div class="row actions">
+            <select id="contractJsonHistory" title="Previous contract JSON inputs">
+              <option value="">Previous contract JSON...</option>
+            </select>
+            <button class="secondary" id="loadContractHistoryBtn" type="button">Load Previous Contract</button>
+          </div>
 
           <label style="display:flex; gap:10px; align-items:flex-start; font-weight:600;">
             <input id="fastMode" type="checkbox" checked style="width:auto; margin-top:4px;" />
@@ -236,6 +334,54 @@
             <div class="downloads" id="hldDownloads"></div>
             <h3>Generated HLD Preview</h3>
             <div id="hldPreview" class="doc small">HLD will appear here after generation.</div>
+            <div class="review-box">
+              <h4>Human Review: HLD</h4>
+              <p class="small">Create/load a review, submit feedback, create a draft, then approve or reject it.</p>
+              <div class="row">
+                <button id="createHldReviewBtn" type="button" disabled>Create / Load HLD Review</button>
+                <button class="secondary" id="refreshHldReviewBtn" type="button" disabled>Refresh Review</button>
+              </div>
+              <div id="hldReviewMeta" class="review-meta">No HLD review session loaded.</div>
+              <div id="hldCascadeWarning" class="review-warning hidden"></div>
+              <label for="hldTargetSection">Target Section</label>
+              <input id="hldTargetSection" placeholder="Optional, e.g. 2. Logical View" />
+              <div class="row">
+                <div style="flex:1">
+                  <label for="hldChangeType">Change Type</label>
+                  <select id="hldChangeType">
+                    <option value="correction">Correction</option>
+                    <option value="addition">Addition</option>
+                    <option value="diagram">Diagram</option>
+                    <option value="formatting">Formatting</option>
+                    <option value="missing_evidence">Missing evidence</option>
+                    <option value="full_rewrite">Full rewrite</option>
+                  </select>
+                </div>
+                <div style="flex:1">
+                  <label for="hldPriority">Priority</label>
+                  <select id="hldPriority">
+                    <option value="low">Low</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </div>
+              </div>
+              <label for="hldFeedback">Reviewer Feedback</label>
+              <textarea id="hldFeedback" placeholder="Describe what should change in the HLD."></textarea>
+              <div class="row actions">
+                <button id="submitHldFeedbackBtn" type="button" disabled>Submit Feedback</button>
+                <button id="reviseHldBtn" type="button" disabled>Create Draft</button>
+                <button class="secondary" id="retryHldDraftBtn" type="button" disabled>Retry Draft</button>
+                <button id="approveHldDraftBtn" type="button" disabled>Approve Draft</button>
+                <button class="secondary" id="rejectHldDraftBtn" type="button" disabled>Reject Draft</button>
+              </div>
+              <div class="row actions">
+                <button class="secondary" id="auditHldReviewBtn" type="button" disabled>Load Audit</button>
+              </div>
+              <div class="downloads" id="hldReviewDownloads"></div>
+              <pre id="hldChangePlan" class="review-meta">Change plan will appear here.</pre>
+              <div id="hldDiff" class="diff">Draft diff will appear here.</div>
+            </div>
           </div>
 
           <div id="modulePanel" class="hidden">
@@ -251,19 +397,65 @@
           <div id="mddPanel" class="hidden">
             <div class="row">
               <button class="secondary" id="backToModulesBtn">Back to Modules</button>
+              <button class="secondary" id="refreshMddPreviewBtn" type="button">Refresh MDD Preview</button>
             </div>
             <h3>Generated MDD Documents</h3>
             <div id="mddDownloads" class="downloads"></div>
-            <div class="split">
-              <div>
-                <h4>MDD Markdown Preview</h4>
-                <div id="mddPreview" class="doc small">Select a generated MDD to preview markdown.</div>
+            <label for="mddReviewModule">MDD Module</label>
+            <select id="mddReviewModule"></select>
+            <h3>MDD Markdown Preview</h3>
+            <p class="small">Click a section heading below to select it for human-in-the-loop review feedback.</p>
+            <div id="mddPreview" class="doc small">Select a generated MDD to preview markdown.</div>
+            <div class="review-box">
+              <h4>Human Review: MDD</h4>
+              <p class="small">Create/load a review for the selected module, submit feedback, create a draft, then approve or reject it.</p>
+              <div class="row actions">
+                <button id="createMddReviewBtn" type="button" disabled>Create / Load MDD Review</button>
+                <button class="secondary" id="refreshMddReviewBtn" type="button" disabled>Refresh Review</button>
               </div>
-              <div>
-                <h4>Generation Metadata</h4>
-                <div id="mddMeta" class="doc small">MDD metadata will appear here.</div>
+              <div id="mddReviewMeta" class="review-meta">No MDD review session loaded.</div>
+              <div id="mddCascadeWarning" class="review-warning hidden"></div>
+              <label for="mddTargetSection">Target Section</label>
+              <input id="mddTargetSection" placeholder="Optional, e.g. Interfaces and APIs" />
+              <div class="row">
+                <div style="flex:1">
+                  <label for="mddChangeType">Change Type</label>
+                  <select id="mddChangeType">
+                    <option value="correction">Correction</option>
+                    <option value="addition">Addition</option>
+                    <option value="diagram">Diagram</option>
+                    <option value="formatting">Formatting</option>
+                    <option value="missing_evidence">Missing evidence</option>
+                    <option value="full_rewrite">Full rewrite</option>
+                  </select>
+                </div>
+                <div style="flex:1">
+                  <label for="mddPriority">Priority</label>
+                  <select id="mddPriority">
+                    <option value="low">Low</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </div>
               </div>
+              <label for="mddFeedback">Reviewer Feedback</label>
+              <textarea id="mddFeedback" placeholder="Describe what should change in the selected MDD."></textarea>
+              <div class="row actions">
+                <button id="submitMddFeedbackBtn" type="button" disabled>Submit Feedback</button>
+                <button id="reviseMddBtn" type="button" disabled>Create Draft</button>
+                <button class="secondary" id="retryMddDraftBtn" type="button" disabled>Retry Draft</button>
+                <button id="approveMddDraftBtn" type="button" disabled>Approve Draft</button>
+                <button class="secondary" id="rejectMddDraftBtn" type="button" disabled>Reject Draft</button>
+              </div>
+              <div class="row actions">
+                <button class="secondary" id="auditMddReviewBtn" type="button" disabled>Load Audit</button>
+              </div>
+              <div class="downloads" id="mddReviewDownloads"></div>
+              <pre id="mddChangePlan" class="review-meta">Change plan will appear here.</pre>
+              <div id="mddDiff" class="diff">Draft diff will appear here.</div>
             </div>
+            <h4>Generation Metadata</h4>
+            <div id="mddMeta" class="doc small">MDD metadata will appear here.</div>
           </div>
         </div>
       </section>
@@ -278,15 +470,96 @@
       contractPath: "",
       hldDocxPath: "",
       modules: [],
-      generatedMdd: []
+      generatedMdd: [],
+      reviews: {
+        hld: null,
+        mdd: {}
+      },
+      reviewDrafts: {
+        hld: null,
+        mdd: {}
+      },
+      reviewFeedback: {
+        hld: null,
+        mdd: {}
+      },
+      reviewPlans: {
+        hld: null,
+        mdd: {}
+      },
+      reviewBusy: {
+        hld: false,
+        mdd: {}
+      },
+      reviewJobs: {
+        hld: null,
+        mdd: {}
+      },
+      selectedSections: {
+        hld: null,
+        mdd: {}
+      }
     };
 
     const $ = (id) => document.getElementById(id);
+    const INPUT_HISTORY_KEY = "hld_mdd_demo_input_history_v1";
+    const INPUT_HISTORY_LIMIT = 8;
 
     function setStatus(message, type = "") {
       const el = $("status");
       el.textContent = message;
       el.className = `status ${type}`;
+    }
+
+    function loadInputHistory() {
+      try {
+        return JSON.parse(localStorage.getItem(INPUT_HISTORY_KEY) || "{}");
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function saveInputHistory(history) {
+      localStorage.setItem(INPUT_HISTORY_KEY, JSON.stringify(history));
+    }
+
+    function rememberInput(name, value) {
+      const normalized = typeof value === "string" ? value.trim() : "";
+      if (!normalized) return;
+      const history = loadInputHistory();
+      const current = Array.isArray(history[name]) ? history[name] : [];
+      history[name] = [normalized, ...current.filter(item => item !== normalized)].slice(0, INPUT_HISTORY_LIMIT);
+      saveInputHistory(history);
+      renderInputHistory();
+    }
+
+    function rememberCurrentInputs() {
+      rememberInput("confluenceUrl", $("confluenceUrl").value);
+      rememberInput("product", $("product").value);
+      rememberInput("release", $("release").value);
+      rememberInput("ticket", $("ticket").value);
+      rememberInput("contractJson", $("contractJson").value);
+    }
+
+    function renderInputHistory() {
+      const history = loadInputHistory();
+      [
+        ["confluenceUrl", "confluenceUrlHistory"],
+        ["product", "productHistory"],
+        ["release", "releaseHistory"],
+        ["ticket", "ticketHistory"],
+      ].forEach(([name, listId]) => {
+        const values = Array.isArray(history[name]) ? history[name] : [];
+        $(listId).innerHTML = values.map(value => `<option value="${escapeHtml(value)}"></option>`).join("");
+      });
+      const contracts = Array.isArray(history.contractJson) ? history.contractJson : [];
+      $("contractJsonHistory").innerHTML = [
+        '<option value="">Previous contract JSON...</option>',
+        ...contracts.map((value, index) => {
+          const label = value.length > 80 ? `${value.slice(0, 80)}...` : value;
+          return `<option value="${index}">${escapeHtml(label)}</option>`;
+        }),
+      ].join("");
     }
 
     function setBusy(busy) {
@@ -303,6 +576,9 @@
       $("modulePanel").classList.toggle("hidden", name !== "modules");
       $("mddPanel").classList.toggle("hidden", name !== "mdd");
       setStep(name === "hld" ? 2 : name === "modules" ? 3 : name === "mdd" ? 4 : 1);
+      if (name === "mdd") {
+        hydrateMddFromManifest().then(() => refreshMddPreview()).catch(() => {});
+      }
     }
 
     async function api(path, options = {}) {
@@ -323,6 +599,78 @@
       return `/api/demo/artifact?path=${encodeURIComponent(path)}`;
     }
 
+    function reviewQuery() {
+      const params = new URLSearchParams();
+      if (state.product) params.set("product", state.product);
+      if (state.release) params.set("release", state.release);
+      return params.toString();
+    }
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function selectedMddSlug() {
+      return $("mddReviewModule").value || "";
+    }
+
+    function currentReviewKey(type) {
+      return type === "hld" ? "hld" : selectedMddSlug();
+    }
+
+    function latestDraftVersion(review) {
+      return ((review && review.versions) || []).slice().reverse().find(item => item.status === "draft")?.version || null;
+    }
+
+    function latestActionableFeedback(review) {
+      return ((review && review.feedback_items) || [])
+        .slice()
+        .reverse()
+        .find(item => ["open", "changes_requested"].includes(item.status)) || null;
+    }
+
+    function isReviewBusy(type) {
+      return type === "hld" ? state.reviewBusy.hld : !!state.reviewBusy.mdd[selectedMddSlug()];
+    }
+
+    function setReviewBusy(type, busy) {
+      if (type === "hld") state.reviewBusy.hld = busy;
+      else state.reviewBusy.mdd[selectedMddSlug()] = busy;
+      setReviewButtons(type);
+    }
+
+    function setReviewProgress(type, message) {
+      const isHld = type === "hld";
+      const meta = $(isHld ? "hldReviewMeta" : "mddReviewMeta");
+      const diff = $(isHld ? "hldDiff" : "mddDiff");
+      meta.classList.toggle("working", !!message);
+      if (message) {
+        meta.textContent = message;
+        diff.textContent = message;
+      }
+    }
+
+    async function runReviewAction(type, message, action) {
+      setReviewBusy(type, true);
+      setReviewProgress(type, message);
+      setStatus(message);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      try {
+        return await action();
+      } catch (err) {
+        setReviewProgress(type, `Failed: ${err.message || String(err)}`);
+        throw err;
+      } finally {
+        setReviewBusy(type, false);
+        const meta = $(type === "hld" ? "hldReviewMeta" : "mddReviewMeta");
+        meta.classList.remove("working");
+      }
+    }
+
     async function getArtifactStatus(product, release) {
       const params = new URLSearchParams();
       if (product) params.set("product", product);
@@ -330,18 +678,40 @@
       return api(`/api/demo/artifacts/status?${params.toString()}`);
     }
 
-    function renderMarkdown(markdown) {
+    function renderMarkdown(markdown, type = "") {
       const escaped = markdown
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
       return escaped
-        .replace(/^### (.*)$/gm, "<h3>$1</h3>")
-        .replace(/^## (.*)$/gm, "<h2>$1</h2>")
-        .replace(/^# (.*)$/gm, "<h1>$1</h1>")
+        .replace(/^### (.*)$/gm, (_match, title) => selectableHeading(3, title, type))
+        .replace(/^## (.*)$/gm, (_match, title) => selectableHeading(2, title, type))
+        .replace(/^# (.*)$/gm, (_match, title) => selectableHeading(1, title, type))
         .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
         .replace(/`([^`]+)`/g, "<code>$1</code>")
         .replace(/\n/g, "<br />");
+    }
+
+    function selectableHeading(level, title, type) {
+      const cleanTitle = String(title || "").trim();
+      return `<h${level} class="review-section-heading" data-review-type="${escapeHtml(type)}" data-section="${escapeHtml(cleanTitle)}">${cleanTitle}</h${level}>`;
+    }
+
+    function selectPreviewSection(type, section) {
+      if (!section) return;
+      if (type === "hld") state.selectedSections.hld = section;
+      else state.selectedSections.mdd[selectedMddSlug()] = section;
+      $(type === "hld" ? "hldTargetSection" : "mddTargetSection").value = section;
+      highlightSelectedSection(type);
+      setStatus(`Selected section for ${type.toUpperCase()} feedback: ${section}`, "ok");
+    }
+
+    function highlightSelectedSection(type) {
+      const selected = type === "hld" ? state.selectedSections.hld : state.selectedSections.mdd[selectedMddSlug()];
+      const container = $(type === "hld" ? "hldPreview" : "mddPreview");
+      container.querySelectorAll(".review-section-heading").forEach(el => {
+        el.classList.toggle("selected", el.dataset.section === selected);
+      });
     }
 
     async function readContract() {
@@ -375,7 +745,7 @@
         setStatus(`${label} ${status.status}: ${status.progress}%\n${status.message || ""}`);
         if (status.status === "completed") return status.result;
         if (status.status === "failed") throw new Error(status.error || `${label} generation failed.`);
-        await new Promise(resolve => setTimeout(resolve, 2500));
+        await new Promise(resolve => setTimeout(resolve, 1500));
       }
     }
 
@@ -429,6 +799,10 @@
         state.release = saved.release;
         state.ticket = saved.ticket;
         state.contractPath = saved.contract_path;
+        $("product").value = state.product;
+        $("release").value = state.release;
+        $("ticket").value = state.ticket || "";
+        rememberCurrentInputs();
 
         artifactStatus = fastMode ? await getArtifactStatus(state.product, state.release) : artifactStatus;
 
@@ -470,6 +844,7 @@
         renderHldDownloads();
         $("nextModulesBtn").disabled = false;
         $("refreshHldBtn").disabled = false;
+        $("createHldReviewBtn").disabled = false;
         setStatus(`HLD generated for ${state.product}/${state.release}.`, "ok");
       } catch (err) {
         $("hldPreview").textContent = "HLD generation failed.";
@@ -481,7 +856,8 @@
 
     async function refreshHldPreview() {
       const markdown = await api(`/api/hld/latest?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}`);
-      $("hldPreview").innerHTML = renderMarkdown(markdown);
+      $("hldPreview").innerHTML = renderMarkdown(markdown, "hld");
+      highlightSelectedSection("hld");
     }
 
     function renderHldDownloads() {
@@ -491,13 +867,482 @@
       $("hldDownloads").innerHTML = links.join("");
     }
 
+    function setReviewButtons(type) {
+      const review = type === "hld" ? state.reviews.hld : state.reviews.mdd[selectedMddSlug()];
+      const draft = type === "hld" ? state.reviewDrafts.hld : state.reviewDrafts.mdd[selectedMddSlug()];
+      const busy = isReviewBusy(type);
+      const hasReview = !!review;
+      const prefix = type === "hld" ? "Hld" : "Mdd";
+      const feedbackId = type === "hld" ? state.reviewFeedback.hld : state.reviewFeedback.mdd[selectedMddSlug()];
+      const canDraft = hasReview && !!feedbackId && !draft;
+      $(`submit${prefix}FeedbackBtn`).disabled = busy || !hasReview;
+      $(`revise${prefix}Btn`).disabled = busy || !canDraft;
+      const latestJob = type === "hld" ? state.reviewJobs.hld : state.reviewJobs.mdd[selectedMddSlug()];
+      $(`retry${prefix}DraftBtn`).disabled = busy || !hasReview || !latestJob;
+      $(`approve${prefix}DraftBtn`).disabled = busy || !hasReview || !draft;
+      $(`reject${prefix}DraftBtn`).disabled = busy || !hasReview || !draft;
+      $(`audit${prefix}ReviewBtn`).disabled = busy || !hasReview;
+      $(`refresh${prefix}ReviewBtn`).disabled = busy || !hasReview;
+    }
+
+    function renderReview(type, review, options = {}) {
+      const isHld = type === "hld";
+      const key = isHld ? "hld" : selectedMddSlug();
+      if (isHld) state.reviews.hld = review;
+      else state.reviews.mdd[key] = review;
+
+      const metaId = isHld ? "hldReviewMeta" : "mddReviewMeta";
+      const downloadsId = isHld ? "hldReviewDownloads" : "mddReviewDownloads";
+      const diffId = isHld ? "hldDiff" : "mddDiff";
+      const planId = isHld ? "hldChangePlan" : "mddChangePlan";
+      const current = review.current_version || "v1";
+      const currentEntry = (review.versions || []).find(item => item.version === current) || {};
+      const activeDraft = latestDraftVersion(review);
+      const activeFeedback = latestActionableFeedback(review);
+      if (isHld) {
+        state.reviewDrafts.hld = activeDraft;
+        state.reviewFeedback.hld = activeFeedback ? activeFeedback.feedback_id : null;
+      } else {
+        state.reviewDrafts.mdd[key] = activeDraft;
+        state.reviewFeedback.mdd[key] = activeFeedback ? activeFeedback.feedback_id : null;
+      }
+      const feedback = (review.feedback_items || []).slice(-1)[0];
+      if (!options.keepFormValues) clearReviewForm(type);
+      renderCascadeWarning(type, review, options);
+      const statusLines = [
+        `Review: ${review.review_id}`,
+        currentEntry.artifact_name ? `Document: ${currentEntry.artifact_name}` : "",
+        currentEntry.source_path ? `Source: ${currentEntry.source_path.split(/[\\/]/).pop()}` : "",
+        `Status: ${review.status}`,
+        `Current version: ${current}`,
+        currentEntry.artifact_timestamp ? `Timestamp: ${currentEntry.artifact_timestamp}` : "",
+        activeDraft ? `Draft ready: ${activeDraft}` : "",
+        `Feedback count: ${(review.feedback_items || []).length}`,
+        review.stale ? `Stale: ${review.stale_reason || "yes"}` : "",
+        feedback ? `Latest feedback: ${feedback.status} (${feedback.feedback_id})` : "",
+        feedback && feedback.target_section ? `Detected section: ${feedback.target_section}` : "",
+        feedback && feedback.section_detection ? `Section confidence: ${Math.round((feedback.section_detection.confidence || 0) * 100)}%` : ""
+      ].filter(Boolean);
+      $(metaId).textContent = statusLines.join("\n");
+      $(downloadsId).innerHTML = `
+        <a href="/api/reviews/${encodeURIComponent(review.review_id)}/download?${reviewQuery()}&version=${encodeURIComponent(current)}&format=docx" target="_blank">Download Current DOCX</a>
+        <a href="/api/reviews/${encodeURIComponent(review.review_id)}/download?${reviewQuery()}&version=${encodeURIComponent(current)}&format=md" target="_blank">Open Current Markdown</a>
+        <a href="/api/reviews/${encodeURIComponent(review.review_id)}/export?${reviewQuery()}&format=json" target="_blank">Export Review JSON</a>
+      `;
+      if (!activeDraft) {
+        $(diffId).textContent = "Draft diff will appear here.";
+      } else if ($(diffId).textContent === "Draft diff will appear here.") {
+        $(diffId).textContent = `Loading diff for ${activeDraft}...`;
+        if (!options.skipDiffLoad) loadDraftDiff(type, review, activeDraft).catch(err => {
+          $(diffId).textContent = `Draft ${activeDraft} is ready, but diff could not be loaded: ${err.message || String(err)}`;
+        });
+      }
+      const activePlan = isHld ? state.reviewPlans.hld : state.reviewPlans.mdd[key];
+      if (!activePlan && $(planId).textContent.trim() === "") {
+        $(planId).textContent = "Change plan will appear here.";
+      }
+      setReviewButtons(type);
+    }
+
+    function renderCascadeWarning(type, review, options = {}) {
+      const isHld = type === "hld";
+      const warningEl = $(isHld ? "hldCascadeWarning" : "mddCascadeWarning");
+      let message = "";
+      if (!isHld && review.stale) {
+        message = [
+          "MDD needs regeneration/review.",
+          review.stale_reason ? `Reason: ${review.stale_reason}` : "Reason: Latest approved HLD changed.",
+          (review.affected_by || []).length ? `Affected by HLD version(s): ${(review.affected_by || []).join(", ")}` : "",
+          "Finalization is blocked until this MDD is updated against the latest HLD."
+        ].filter(Boolean).join("\n");
+      }
+      if (isHld && options.showApprovalCascade) {
+        const latestApproval = (review.audit || []).slice().reverse().find(event =>
+          event.event === "draft_approved" && ((event.marked_stale_reviews || []).length || (event.affected_modules || []).length)
+        );
+        if (latestApproval) {
+          const affectedModules = (latestApproval.affected_modules || [])
+            .map(item => item.module || item.slug)
+            .filter(Boolean);
+          const staleReviews = latestApproval.marked_stale_reviews || [];
+          message = [
+            "HLD approval marked MDD review(s) as stale.",
+            affectedModules.length ? `Affected modules: ${affectedModules.join(", ")}` : "",
+            staleReviews.length ? `Affected MDD review IDs: ${staleReviews.join(", ")}` : "",
+            "Open the related MDD review(s) to regenerate/review them before final approval."
+          ].filter(Boolean).join("\n");
+        }
+      }
+      warningEl.textContent = message;
+      warningEl.classList.toggle("hidden", !message);
+    }
+
+    function clearReviewForm(type) {
+      const isHld = type === "hld";
+      $(isHld ? "hldTargetSection" : "mddTargetSection").value = "";
+      $(isHld ? "hldFeedback" : "mddFeedback").value = "";
+    }
+
+    function structuredFeedbackPayload(type, review, feedbackText, targetSection) {
+      const prefix = type === "hld" ? "hld" : "mdd";
+      const selectedSection = type === "hld" ? state.selectedSections.hld : state.selectedSections.mdd[selectedMddSlug()];
+      const changeType = $(`${prefix}ChangeType`).value;
+      return {
+        feedback: feedbackText,
+        target_section: targetSection || selectedSection || null,
+        change_type: changeType,
+        priority: $(`${prefix}Priority`).value,
+        target_kind: inferTargetKind(changeType, feedbackText),
+        reviewer_expectation: null,
+        base_version: review.current_version,
+        reviewer: "frontend_reviewer"
+      };
+    }
+
+    function inferTargetKind(changeType, feedbackText) {
+      const text = (feedbackText || "").toLowerCase();
+      if (changeType === "full_rewrite" || /\b(whole|entire|full)\s+(document|doc)\b/.test(text)) return "full_document";
+      if (changeType === "diagram" || /\b(diagram|mermaid|flowchart|sequence|flow)\b/.test(text)) return "diagram";
+      if (/\b(table|row|column|cell)\b/.test(text)) return "table";
+      return "section";
+    }
+
+    function renderPlan(type, plan) {
+      const isHld = type === "hld";
+      const key = isHld ? "hld" : selectedMddSlug();
+      if (isHld) state.reviewPlans.hld = plan;
+      else state.reviewPlans.mdd[key] = plan;
+      const lines = [
+        `Target: ${plan.target_section || plan.target_scope || "document"}`,
+        `Router: ${plan.router_source || (plan.section_detection && plan.section_detection.router_source) || "n/a"}`,
+        `Confidence: ${plan.section_confidence != null ? Math.round(plan.section_confidence * 100) + "%" : "n/a"}`,
+        `Exact intent: ${plan.exact_intent || (plan.classification && plan.classification.exact_intent) || "n/a"}`,
+        `Entities: ${(plan.extracted_entities || []).join(", ") || "n/a"}`,
+        `Planned action: ${plan.planned_action || "n/a"}`,
+        `Classification: ${(plan.classification && (plan.classification.tags || []).join(", ")) || "n/a"}`,
+        `Evidence: ${(plan.evidence_summary && plan.evidence_summary.evidence_status) || "unknown"}`,
+        `Unsupported claims: ${(plan.unsupported_claims || []).join(", ") || "none"}`,
+        "",
+        "Intent constraints:",
+        ...((plan.intent_constraints || (plan.classification && plan.classification.intent_constraints) || []).map(item => `- ${item}`)),
+        "",
+        "Intended changes:",
+        ...((plan.intended_changes || []).map(item => `- ${item}`)),
+        "",
+        "Citations:",
+        ...(((plan.evidence_summary && plan.evidence_summary.citations) || []).map(item => `- ${item.kind}: ${item.path}`)),
+        "",
+        "Preserve:",
+        ...((plan.preserve || []).map(item => `- ${item}`))
+      ];
+      $(isHld ? "hldChangePlan" : "mddChangePlan").textContent = lines.join("\n");
+    }
+
+    function renderRichDiff(type, result) {
+      const diff = result.diff || {};
+      const validation = result.validation_report || {};
+      const evidence = result.evidence_summary || {};
+      const validationSummary = formatValidationSummary(validation);
+      const summary = [
+        "Change summary:",
+        ...((diff.change_summary || []).map(item => `- ${item}`)),
+        `Changed sections: ${(diff.changed_sections || []).join(", ") || "n/a"}`,
+        `Mermaid changed: ${diff.mermaid_changed ? "yes" : "no"}`,
+        `Quality score: ${validation.quality_score ?? "n/a"}`,
+        `Blocking issues: ${(validation.blocking || []).length}`,
+        "",
+        "Validation summary:",
+        validationSummary,
+        "",
+        "Evidence:",
+        JSON.stringify(evidence, null, 2),
+        "",
+        "Validation:",
+        JSON.stringify(validation, null, 2)
+      ].join("\n");
+      $(type === "hld" ? "hldDiff" : "mddDiff").innerHTML = `
+        <pre>${escapeHtml(summary)}</pre>
+        <div class="side-diff">
+          <div><strong>Old snippet</strong><pre>${escapeHtml(diff.old_snippet || "")}</pre></div>
+          <div><strong>New snippet</strong><pre>${escapeHtml(diff.new_snippet || "")}</pre></div>
+        </div>
+        ${renderMermaidDiff(diff)}
+        <pre>${escapeHtml(diff.unified_diff || "")}</pre>
+      `;
+      if (result.change_plan) renderPlan(type, result.change_plan);
+    }
+
+    function formatValidationSummary(validation) {
+      const blocking = validation.blocking || [];
+      const warnings = validation.warnings || [];
+      if (!blocking.length && !warnings.length) return "No blocking issues or warnings.";
+      const lines = [];
+      if (blocking.length) {
+        lines.push("Blocking:");
+        blocking.forEach(issue => lines.push(`- ${issue.message || issue.type || JSON.stringify(issue)}`));
+      }
+      if (warnings.length) {
+        lines.push("Warnings:");
+        warnings.forEach(issue => lines.push(`- ${issue.message || issue.type || JSON.stringify(issue)}`));
+      }
+      return lines.join("\n");
+    }
+
+    function renderMermaidDiff(diff) {
+      const before = diff.mermaid_before || [];
+      const after = diff.mermaid_after || [];
+      const details = diff.mermaid_change_details || [];
+      if (!before.length && !after.length) return "";
+      return `
+        <div class="side-diff">
+          <div><strong>Mermaid before</strong><pre>${escapeHtml(before.join("\n\n--- diagram ---\n\n"))}</pre></div>
+          <div><strong>Mermaid after</strong><pre>${escapeHtml(after.join("\n\n--- diagram ---\n\n"))}</pre></div>
+        </div>
+        <pre>${escapeHtml(details.length ? JSON.stringify(details, null, 2) : "No Mermaid line-level changes detected.")}</pre>
+      `;
+    }
+
+    async function loadDraftDiff(type, review, draftVersion) {
+      const result = await api(`/api/reviews/${encodeURIComponent(review.review_id)}/diff/${encodeURIComponent(draftVersion)}?${reviewQuery()}`);
+      renderRichDiff(type, {
+        diff: result.diff,
+        validation_report: ((review.versions || []).find(item => item.version === draftVersion) || {}).validation_report || {},
+        evidence_summary: ((review.versions || []).find(item => item.version === draftVersion) || {}).evidence_summary || {},
+        change_plan: ((review.versions || []).find(item => item.version === draftVersion) || {}).change_plan || null
+      });
+    }
+
+    async function findExistingReview(type, moduleSlug = "") {
+      const params = new URLSearchParams(reviewQuery());
+      params.set("document_type", type);
+      if (moduleSlug) params.set("module_slug", moduleSlug);
+      const result = await api(`/api/reviews?${params.toString()}`);
+      return (result.reviews || [])[0] || null;
+    }
+
+    async function createOrLoadReview(type) {
+      return runReviewAction(type, `Creating or loading ${type.toUpperCase()} review session...`, async () => {
+        const moduleSlug = type === "mdd" ? selectedMddSlug() : "";
+        if (type === "mdd" && !moduleSlug) throw new Error("Select an MDD module first.");
+        let review = await findExistingReview(type, moduleSlug);
+        if (!review) {
+          const body = {
+            document_type: type,
+            product: state.product,
+            release: state.release,
+            created_by: "frontend_reviewer"
+          };
+          if (moduleSlug) body.module_slug = moduleSlug;
+          const created = await api("/api/reviews/create", {
+            method: "POST",
+            body: JSON.stringify(body)
+          });
+          review = created.review;
+        }
+        renderReview(type, review);
+        if (type === "mdd") await refreshMddPreview();
+        setStatus(`${type.toUpperCase()} review loaded: ${review.review_id}`, "ok");
+        return review;
+      });
+    }
+
+    async function refreshReview(type) {
+      return runReviewAction(type, `Refreshing ${type.toUpperCase()} review...`, async () => {
+        const review = type === "hld" ? state.reviews.hld : state.reviews.mdd[selectedMddSlug()];
+        if (!review) return createOrLoadReview(type);
+        const refreshed = await api(`/api/reviews/${encodeURIComponent(review.review_id)}?${reviewQuery()}`);
+        renderReview(type, refreshed.review);
+        setStatus(`${type.toUpperCase()} review refreshed.`, "ok");
+        return refreshed.review;
+      });
+    }
+
+    async function submitReviewFeedback(type) {
+      return runReviewAction(type, `Saving ${type.toUpperCase()} feedback...`, async () => {
+        const isHld = type === "hld";
+        const review = isHld ? state.reviews.hld : state.reviews.mdd[selectedMddSlug()];
+        if (!review) throw new Error(`Create a ${type.toUpperCase()} review first.`);
+        const feedbackText = $(isHld ? "hldFeedback" : "mddFeedback").value.trim();
+        if (!feedbackText) throw new Error("Enter reviewer feedback first.");
+        const targetSection = $(isHld ? "hldTargetSection" : "mddTargetSection").value.trim() || null;
+        const result = await api(`/api/reviews/${encodeURIComponent(review.review_id)}/feedback?${reviewQuery()}`, {
+          method: "POST",
+          body: JSON.stringify(structuredFeedbackPayload(type, review, feedbackText, targetSection))
+        });
+        if (isHld) state.reviewFeedback.hld = result.feedback.feedback_id;
+        else state.reviewFeedback.mdd[selectedMddSlug()] = result.feedback.feedback_id;
+        if (isHld) state.reviewDrafts.hld = null;
+        else state.reviewDrafts.mdd[selectedMddSlug()] = null;
+        if (result.feedback.target_section && !targetSection) {
+          $(isHld ? "hldTargetSection" : "mddTargetSection").value = result.feedback.target_section;
+        }
+        $(isHld ? "hldDiff" : "mddDiff").textContent = "Create a draft to see the diff for this feedback.";
+        renderReview(type, result.review, { keepFormValues: true });
+        setStatus(`Feedback saved: ${result.feedback.feedback_id}`, "ok");
+      });
+    }
+
+    async function buildAndRenderPlan(type, review, feedbackId) {
+      const result = await api(`/api/reviews/${encodeURIComponent(review.review_id)}/plan-change?${reviewQuery()}`, {
+        method: "POST",
+        body: JSON.stringify({ feedback_id: feedbackId, requested_by: "frontend_reviewer" })
+      });
+      renderPlan(type, result.change_plan);
+      return result.change_plan;
+    }
+
+    function confirmPlanBeforeDraft(type, plan) {
+      const summary = [
+        `Detected section: ${plan.target_section || plan.target_scope || "document"}`,
+        `Router: ${plan.router_source || "n/a"}`,
+        `Confidence: ${plan.section_confidence != null ? Math.round(plan.section_confidence * 100) + "%" : "n/a"}`,
+        `Exact intent: ${plan.exact_intent || "n/a"}`,
+        `Entities: ${(plan.extracted_entities || []).join(", ") || "n/a"}`,
+        `Planned action: ${plan.planned_action || "n/a"}`,
+        "",
+        "Continue creating draft?"
+      ].join("\n");
+      return window.confirm(`${type.toUpperCase()} review plan\n\n${summary}`);
+    }
+
+    async function pollRevisionJob(type, review, jobId) {
+      while (true) {
+        const status = await api(`/api/reviews/${encodeURIComponent(review.review_id)}/revise/status/${encodeURIComponent(jobId)}?${reviewQuery()}`);
+        setReviewProgress(type, `${status.message || "Revision running..."}\nProgress: ${status.progress}%`);
+        setStatus(`${type.toUpperCase()} revision ${status.status}: ${status.progress}%`);
+        if (status.status === "completed") return status.result;
+        if (status.status === "failed") {
+          setReviewButtons(type);
+          throw new Error(status.error || "Revision failed.");
+        }
+        if (status.status === "cancelled") throw new Error("Revision was cancelled.");
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+    }
+
+    async function reviseReview(type) {
+      return runReviewAction(type, `Creating ${type.toUpperCase()} draft revision. This can take a minute because the LLM is revising the document...`, async () => {
+        const isHld = type === "hld";
+        const key = isHld ? "hld" : selectedMddSlug();
+        const review = isHld ? state.reviews.hld : state.reviews.mdd[key];
+        const feedbackId = isHld ? state.reviewFeedback.hld : state.reviewFeedback.mdd[key];
+        if (!review || !feedbackId) throw new Error("Submit feedback before creating a draft revision.");
+        setReviewProgress(type, `Building ${type.toUpperCase()} change plan before creating the draft...`);
+        const plan = await buildAndRenderPlan(type, review, feedbackId);
+        if (!confirmPlanBeforeDraft(type, plan)) {
+          setStatus("Draft creation cancelled. Adjust feedback or selected section and try again.");
+          return;
+        }
+        setReviewProgress(type, `Creating ${type.toUpperCase()} draft revision. This can take a minute because the LLM is revising the document...`);
+        const result = await api(`/api/reviews/${encodeURIComponent(review.review_id)}/revise?${reviewQuery()}`, {
+          method: "POST",
+          body: JSON.stringify({ feedback_id: feedbackId, requested_by: "frontend_reviewer" })
+        });
+        if (isHld) state.reviewJobs.hld = result.job_id;
+        else state.reviewJobs.mdd[key] = result.job_id;
+        const completed = await pollRevisionJob(type, review, result.job_id);
+        if (isHld) state.reviewDrafts.hld = completed.draft_version;
+        else state.reviewDrafts.mdd[key] = completed.draft_version;
+        renderReview(type, completed.review, { skipDiffLoad: true });
+        renderRichDiff(type, completed);
+        setStatus(`Draft created: ${completed.draft_version}`, "ok");
+      });
+    }
+
+    async function retryDraft(type) {
+      return runReviewAction(type, `Retrying ${type.toUpperCase()} draft revision...`, async () => {
+        const isHld = type === "hld";
+        const key = isHld ? "hld" : selectedMddSlug();
+        const review = isHld ? state.reviews.hld : state.reviews.mdd[key];
+        const jobId = isHld ? state.reviewJobs.hld : state.reviewJobs.mdd[key];
+        if (!review) throw new Error("Load a review first.");
+        if (!jobId) return reviseReview(type);
+        const result = await api(`/api/reviews/${encodeURIComponent(review.review_id)}/revise/${encodeURIComponent(jobId)}/retry?${reviewQuery()}`, {
+          method: "POST",
+          body: JSON.stringify({ requested_by: "frontend_reviewer", reason: "Retry requested from review UI." })
+        });
+        if (isHld) state.reviewJobs.hld = result.job_id;
+        else state.reviewJobs.mdd[key] = result.job_id;
+        const completed = await pollRevisionJob(type, review, result.job_id);
+        if (isHld) state.reviewDrafts.hld = completed.draft_version;
+        else state.reviewDrafts.mdd[key] = completed.draft_version;
+        renderReview(type, completed.review, { skipDiffLoad: true });
+        renderRichDiff(type, completed);
+        setStatus(`Retry draft created: ${completed.draft_version}`, "ok");
+      });
+    }
+
+    async function decideReview(type, decision) {
+      return runReviewAction(type, `${decision === "approve" ? "Approving" : "Rejecting"} ${type.toUpperCase()} draft...`, async () => {
+        const isHld = type === "hld";
+        const key = isHld ? "hld" : selectedMddSlug();
+        const review = isHld ? state.reviews.hld : state.reviews.mdd[key];
+        const draft = isHld ? state.reviewDrafts.hld : state.reviewDrafts.mdd[key];
+        const feedbackId = isHld ? state.reviewFeedback.hld : state.reviewFeedback.mdd[key];
+        if (!review || !draft) throw new Error("Create a draft before approving or rejecting.");
+        const result = await api(`/api/reviews/${encodeURIComponent(review.review_id)}/${decision}?${reviewQuery()}`, {
+          method: "POST",
+          body: JSON.stringify({
+            draft_version: draft,
+            feedback_id: feedbackId,
+            decided_by: "frontend_reviewer"
+          })
+        });
+        if (isHld) state.reviewDrafts.hld = null;
+        else state.reviewDrafts.mdd[key] = null;
+        const showApprovalCascade = isHld && decision === "approve";
+        renderReview(type, result.review, { showApprovalCascade });
+        const latestApproval = showApprovalCascade
+          ? (result.review.audit || []).slice().reverse().find(event =>
+              event.event === "draft_approved" && ((event.marked_stale_reviews || []).length || (event.affected_modules || []).length)
+            )
+          : null;
+        if (latestApproval) {
+          const affectedModules = (latestApproval.affected_modules || [])
+            .map(item => item.module || item.slug)
+            .filter(Boolean);
+          const staleReviews = latestApproval.marked_stale_reviews || [];
+          setStatus(
+            [
+              "HLD draft approved.",
+              affectedModules.length ? `Affected modules: ${affectedModules.join(", ")}.` : "",
+              staleReviews.length ? `Marked MDD review(s) stale: ${staleReviews.join(", ")}.` : ""
+            ].filter(Boolean).join(" "),
+            "ok"
+          );
+        } else {
+          setStatus(`${type.toUpperCase()} draft ${decision === "approve" ? "approved" : "rejected"}.`, "ok");
+        }
+      });
+    }
+
+    async function loadReviewAudit(type) {
+      return runReviewAction(type, `Loading ${type.toUpperCase()} audit timeline...`, async () => {
+        const isHld = type === "hld";
+        const key = isHld ? "hld" : selectedMddSlug();
+        const review = isHld ? state.reviews.hld : state.reviews.mdd[key];
+        if (!review) throw new Error("Load a review first.");
+        const result = await api(`/api/reviews/${encodeURIComponent(review.review_id)}/audit?${reviewQuery()}`);
+        $(isHld ? "hldChangePlan" : "mddChangePlan").textContent = (result.audit || [])
+          .map(event => `${event.at || event.created_at || ""} | ${event.event || "event"} | ${event.actor || ""}`)
+          .join("\n") || "No audit events.";
+        setStatus("Audit timeline loaded.", "ok");
+      });
+    }
+
     async function loadModules() {
       showPanel("modules");
       setStatus("Extracting MDD modules from latest requirements, HLD, and code graph...");
       const catalog = await api(`/api/mdd/modules?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}`);
       state.modules = catalog.modules || [];
       renderModules();
-      setStatus(`Loaded ${state.modules.length} modules.`, "ok");
+      const affectedCount = state.modules.filter(mod => mod.affected_by_hld_change).length;
+      setStatus(
+        affectedCount
+          ? `Loaded ${state.modules.length} modules. ${affectedCount} module(s) may be affected by the latest approved HLD change.`
+          : `Loaded ${state.modules.length} modules.`,
+        "ok"
+      );
     }
 
     function renderModules() {
@@ -506,20 +1351,27 @@
         list.innerHTML = "<p>No modules found. Generate HLD first.</p>";
         return;
       }
-      list.innerHTML = state.modules.map(mod => `
-        <div class="module">
+      const sortedModules = [...state.modules].sort((a, b) => Number(!!b.affected_by_hld_change) - Number(!!a.affected_by_hld_change));
+      list.innerHTML = sortedModules.map(mod => {
+        const affected = !!mod.affected_by_hld_change;
+        const reasons = (mod.hld_impact_reasons || []).slice(0, 3);
+        return `
+        <div class="module ${affected ? "affected" : ""}">
           <label>
-            <input type="checkbox" value="${mod.logical_name}" class="module-check" />
+            <input type="checkbox" value="${escapeHtml(mod.logical_name)}" class="module-check" />
             <span>
-              <strong>${mod.logical_name}</strong>
-              <span class="small">${mod.summary || "No summary available."}</span><br />
-              <span class="pill">${mod.architectural_layer || "Layer TBD"}</span>
+              <strong>${escapeHtml(mod.logical_name)}</strong>
+              <span class="small">${escapeHtml(mod.summary || "No summary available.")}</span><br />
+              ${affected ? `<span class="pill warn">Affected by HLD ${escapeHtml(mod.hld_impact_version || "")} (${escapeHtml(mod.hld_impact_confidence || "possible")})</span>` : ""}
+              <span class="pill">${escapeHtml(mod.architectural_layer || "Layer TBD")}</span>
               <span class="pill">${mod.flow_count || 0} flow(s)</span>
               <span class="pill">${mod.has_code_mapping ? "code mapped" : "not mapped"}</span>
+              ${reasons.length ? `<span class="impact-reasons">${reasons.map(reason => escapeHtml(reason)).join("<br />")}</span>` : ""}
             </span>
           </label>
         </div>
-      `).join("");
+      `;
+      }).join("");
       document.querySelectorAll(".module-check").forEach(el => {
         el.addEventListener("change", () => $("generateMddBtn").disabled = !selectedModules().length);
       });
@@ -556,29 +1408,127 @@
       }
     }
 
+    async function hydrateMddFromManifest() {
+      if (!state.product || !state.release) return;
+      if (state.generatedMdd.length) return;
+      const manifest = await api(`/api/mdd/manifest?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}`);
+      state.generatedMdd = (manifest.generated || []).map(item => ({
+        module: item.module,
+        slug: item.slug,
+        path: item.path,
+        docx_path: item.docx_path
+      }));
+      $("mddReviewModule").innerHTML = state.generatedMdd.map(item => `
+        <option value="${escapeHtml(item.slug)}">${escapeHtml(item.module)}</option>
+      `).join("");
+      $("createMddReviewBtn").disabled = !state.generatedMdd.length;
+      if (state.generatedMdd.length) {
+        $("mddDownloads").innerHTML = state.generatedMdd.map(item => `
+          <a href="/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=docx" target="_blank">${item.module} DOCX</a>
+          <a href="/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=md" target="_blank">${item.module} Markdown</a>
+        `).join("");
+      }
+    }
+
+    async function refreshMddPreview(slug = null) {
+      const targetSlug = slug || selectedMddSlug();
+      if (!state.product || !state.release) {
+        $("mddPreview").textContent = "Set product and release, then generate or load MDD artifacts.";
+        return;
+      }
+      if (!state.generatedMdd.length) {
+        try {
+          await hydrateMddFromManifest();
+        } catch (_) {
+          $("mddPreview").textContent = "No MDD generated yet. Generate MDD first.";
+          return;
+        }
+      }
+      const item = state.generatedMdd.find(entry => entry.slug === targetSlug) || state.generatedMdd[0];
+      if (!item) {
+        $("mddPreview").textContent = "No MDD generated yet. Generate MDD first.";
+        return;
+      }
+      if ($("mddReviewModule").value !== item.slug) {
+        $("mddReviewModule").value = item.slug;
+      }
+      $("mddPreview").textContent = `Loading ${item.module} preview...`;
+      const markdown = await api(`/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=md`);
+      $("mddPreview").innerHTML = renderMarkdown(markdown, "mdd");
+      highlightSelectedSection("mdd");
+    }
+
     async function renderMdd(result) {
       $("mddDownloads").innerHTML = state.generatedMdd.map(item => `
         <a href="/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=docx" target="_blank">${item.module} DOCX</a>
         <a href="/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=md" target="_blank">${item.module} Markdown</a>
       `).join("");
+      $("mddReviewModule").innerHTML = state.generatedMdd.map(item => `
+        <option value="${escapeHtml(item.slug)}">${escapeHtml(item.module)}</option>
+      `).join("");
+      $("createMddReviewBtn").disabled = !state.generatedMdd.length;
       $("mddMeta").innerHTML = `<pre>${JSON.stringify(result, null, 2)}</pre>`;
-      if (state.generatedMdd[0]) {
-        const item = state.generatedMdd[0];
-        const markdown = await api(`/api/mdd/${encodeURIComponent(item.slug)}?product=${encodeURIComponent(state.product)}&release=${encodeURIComponent(state.release)}&format=md`);
-        $("mddPreview").innerHTML = renderMarkdown(markdown);
-      }
+      await refreshMddPreview(selectedMddSlug() || state.generatedMdd[0]?.slug);
     }
 
     $("contractFile").addEventListener("change", async () => {
       const file = $("contractFile").files[0];
       if (file) $("contractJson").value = await file.text();
     });
+    $("loadContractHistoryBtn").addEventListener("click", () => {
+      const index = $("contractJsonHistory").value;
+      const contracts = loadInputHistory().contractJson || [];
+      if (index !== "" && contracts[Number(index)]) {
+        $("contractJson").value = contracts[Number(index)];
+        setStatus("Previous contract JSON loaded.", "ok");
+      }
+    });
+    ["confluenceUrl", "product", "release", "ticket"].forEach(id => {
+      $(id).addEventListener("change", () => rememberInput(id, $(id).value));
+    });
+    renderInputHistory();
     $("generateHldBtn").addEventListener("click", generateHld);
     $("refreshHldBtn").addEventListener("click", refreshHldPreview);
     $("nextModulesBtn").addEventListener("click", loadModules);
     $("backToHldBtn").addEventListener("click", () => showPanel("hld"));
     $("backToModulesBtn").addEventListener("click", () => showPanel("modules"));
     $("generateMddBtn").addEventListener("click", generateMdd);
+    $("refreshMddPreviewBtn").addEventListener("click", () => refreshMddPreview().catch(err => setStatus(err.message || String(err), "err")));
+    $("createHldReviewBtn").addEventListener("click", () => createOrLoadReview("hld").catch(err => setStatus(err.message || String(err), "err")));
+    $("refreshHldReviewBtn").addEventListener("click", () => refreshReview("hld").catch(err => setStatus(err.message || String(err), "err")));
+    $("submitHldFeedbackBtn").addEventListener("click", () => submitReviewFeedback("hld").catch(err => setStatus(err.message || String(err), "err")));
+    $("reviseHldBtn").addEventListener("click", () => reviseReview("hld").catch(err => setStatus(err.message || String(err), "err")));
+    $("retryHldDraftBtn").addEventListener("click", () => retryDraft("hld").catch(err => setStatus(err.message || String(err), "err")));
+    $("approveHldDraftBtn").addEventListener("click", () => decideReview("hld", "approve").catch(err => setStatus(err.message || String(err), "err")));
+    $("rejectHldDraftBtn").addEventListener("click", () => decideReview("hld", "reject").catch(err => setStatus(err.message || String(err), "err")));
+    $("auditHldReviewBtn").addEventListener("click", () => loadReviewAudit("hld").catch(err => setStatus(err.message || String(err), "err")));
+    $("createMddReviewBtn").addEventListener("click", () => createOrLoadReview("mdd").catch(err => setStatus(err.message || String(err), "err")));
+    $("refreshMddReviewBtn").addEventListener("click", () => refreshReview("mdd").catch(err => setStatus(err.message || String(err), "err")));
+    $("submitMddFeedbackBtn").addEventListener("click", () => submitReviewFeedback("mdd").catch(err => setStatus(err.message || String(err), "err")));
+    $("reviseMddBtn").addEventListener("click", () => reviseReview("mdd").catch(err => setStatus(err.message || String(err), "err")));
+    $("retryMddDraftBtn").addEventListener("click", () => retryDraft("mdd").catch(err => setStatus(err.message || String(err), "err")));
+    $("approveMddDraftBtn").addEventListener("click", () => decideReview("mdd", "approve").catch(err => setStatus(err.message || String(err), "err")));
+    $("rejectMddDraftBtn").addEventListener("click", () => decideReview("mdd", "reject").catch(err => setStatus(err.message || String(err), "err")));
+    $("auditMddReviewBtn").addEventListener("click", () => loadReviewAudit("mdd").catch(err => setStatus(err.message || String(err), "err")));
+    $("hldPreview").addEventListener("click", event => {
+      const heading = event.target.closest(".review-section-heading");
+      if (heading) selectPreviewSection("hld", heading.dataset.section);
+    });
+    $("mddPreview").addEventListener("click", event => {
+      const heading = event.target.closest(".review-section-heading");
+      if (heading) selectPreviewSection("mdd", heading.dataset.section);
+    });
+    $("mddReviewModule").addEventListener("change", () => {
+      refreshMddPreview(selectedMddSlug()).catch(err => setStatus(err.message || String(err), "err"));
+      const review = state.reviews.mdd[selectedMddSlug()];
+      if (review) renderReview("mdd", review);
+      else {
+        $("mddReviewMeta").textContent = "No MDD review session loaded.";
+        $("mddReviewDownloads").innerHTML = "";
+        $("mddDiff").textContent = "Draft diff will appear here.";
+        setReviewButtons("mdd");
+      }
+    });
     $("resetBtn").addEventListener("click", () => window.location.reload());
   </script>
 </body>

@@ -1,7 +1,6 @@
 """File-backed vector store for release-scoped RAG artifacts.
 
-This replaces Qdrant for the once-per-release pipeline. Embeddings and chunks
-are stored as JSONL under:
+Embeddings and chunks are stored as JSONL under:
 
     artifacts/<project>/<release>/confluence/
 """

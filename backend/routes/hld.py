@@ -42,17 +42,23 @@ def _hld_result_payload(result) -> Dict[str, Any]:
 
 def _run_hld_job(job_id: str, request: HLDGenerationRequest) -> None:
     job = hld_jobs[job_id]
-    try:
+
+    def update_progress(progress: int, message: str) -> None:
         job.update(
             status="processing",
-            progress=10,
-            message="Generating HLD document. This can take several minutes...",
+            progress=progress,
+            message=message,
+            updated_at=datetime.now().isoformat(),
         )
+
+    try:
+        update_progress(5, "HLD generation started...")
         result = generate_hld(
             product=request.product,
             release=request.release,
             requirements_path=request.requirements_path,
             code_graph_path=request.code_graph_path,
+            progress_callback=update_progress,
         )
         job.update(
             status="completed",

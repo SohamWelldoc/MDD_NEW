@@ -26,10 +26,42 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TypeVar
+
+ProgressCallback = Callable[[int, str], None]
+T = TypeVar("T")
+
+
+def _run_with_progress_pulse(
+    progress: ProgressCallback,
+    progress_pct: int,
+    message: str,
+    action: Callable[[], T],
+    *,
+    interval_seconds: float = 8.0,
+) -> T:
+    """Keep the status message fresh while a long-running step is in progress."""
+    stop = threading.Event()
+    start = time.monotonic()
+
+    def pulse() -> None:
+        while not stop.wait(interval_seconds):
+            elapsed = int(time.monotonic() - start)
+            progress(progress_pct, f"{message} ({elapsed}s elapsed...)")
+
+    progress(progress_pct, message)
+    thread = threading.Thread(target=pulse, daemon=True)
+    thread.start()
+    try:
+        return action()
+    finally:
+        stop.set()
+        thread.join(timeout=0.2)
 
 from services.shared.llm_client import get_llm_client
 from services.shared.mermaid_utils import postprocess_mermaid, validate_diagrams
@@ -389,6 +421,94 @@ def _insert_before_section(markdown: str, section_pattern: str, content: str) ->
     return markdown[:insert_at].rstrip() + "\n\n" + content.strip() + "\n\n" + markdown[insert_at:]
 
 
+def _section_two_bounds(markdown: str) -> tuple[int, int] | None:
+    section2_match = re.search(r"^##\s+2\s+Logical View[^\n]*$", markdown, flags=re.IGNORECASE | re.MULTILINE)
+    if not section2_match:
+        return None
+    section_start = section2_match.end()
+    section_rest = markdown[section_start:]
+    section3 = re.search(r"^##\s+3\b", section_rest, flags=re.MULTILINE)
+    section_end = section_start + (section3.start() if section3 else len(section_rest))
+    return section_start, section_end
+
+
+def _subsection_end_pos(markdown: str, heading_end: int, section_end: int) -> int:
+    after_heading = markdown[heading_end:section_end]
+    next_sub = re.search(r"^###\s+", after_heading, flags=re.MULTILINE)
+    if next_sub:
+        return heading_end + next_sub.start()
+    return section_end
+
+
+def _find_logical_view_diagram_insert_pos(markdown: str) -> int:
+    """Insert diagram subsections after contract/evidence blocks (2.0.x), not before them."""
+    bounds = _section_two_bounds(markdown)
+    if not bounds:
+        return -1
+    section_start, section_end = bounds
+    section_text = markdown[section_start:section_end]
+    reserved_patterns = [
+        r"^###\s+2\.0\.2\s+Open Questions[^\n]*",
+        r"^###\s+2\.0\.1\s+Evidence[^\n]*",
+        r"^###\s+2\.0\s+Architecture Decisions[^\n]*",
+    ]
+    insert_pos = section_start
+    for pattern in reserved_patterns:
+        match = re.search(pattern, section_text, flags=re.IGNORECASE | re.MULTILINE)
+        if not match:
+            continue
+        heading_end = section_start + match.end()
+        insert_pos = max(insert_pos, _subsection_end_pos(markdown, heading_end, section_end))
+    return insert_pos
+
+
+def _insert_at_position(markdown: str, insert_pos: int, content: str) -> str:
+    if not content.strip() or insert_pos < 0:
+        return markdown
+    return markdown[:insert_pos].rstrip() + "\n\n" + content.strip() + "\n\n" + markdown[insert_pos:].lstrip()
+
+
+_RESERVED_SECTION_TWO_TITLES = {
+    "architecture decisions (checkpoint b)",
+    "evidence and confidence summary",
+    "open questions and to be confirmed",
+    "feature architecture flow",
+    "primary interaction sequence",
+    "feature lifecycle",
+    "architecture decisions and evidence",
+}
+
+
+def _is_reserved_section_two_heading(title: str) -> bool:
+    lowered = title.strip().lower()
+    return lowered in _RESERVED_SECTION_TWO_TITLES
+
+
+def _normalize_section_two_numbering(markdown: str) -> str:
+    """Keep 2.0.x and diagram blocks fixed; renumber module/interaction/traceability subsections from 2.5."""
+    bounds = _section_two_bounds(markdown)
+    if not bounds:
+        return markdown
+    section_start, section_end = bounds
+    section_text = markdown[section_start:section_end]
+    heading_re = re.compile(r"^(###)\s+2\.(?:\d+(?:\.\d+)?|[xyz])\s+(.+)$", flags=re.MULTILINE | re.IGNORECASE)
+    next_number = 5
+    parts: List[str] = []
+    last_end = 0
+    for match in heading_re.finditer(section_text):
+        parts.append(section_text[last_end:match.start()])
+        title = match.group(2).strip()
+        if _is_reserved_section_two_heading(title):
+            parts.append(match.group(0))
+        else:
+            parts.append(f"### 2.{next_number} {title}")
+            next_number += 1
+        last_end = match.end()
+    parts.append(section_text[last_end:])
+    normalized_section = "".join(parts)
+    return markdown[:section_start] + normalized_section + markdown[section_end:]
+
+
 def _insert_deterministic_hld_diagrams(
     markdown: str,
     requirements: Dict[str, Any],
@@ -433,7 +553,14 @@ def _insert_deterministic_hld_diagrams(
             _mermaid_fence(diagrams["hld_decision_view"]),
         ])
     logical_block = "\n\n".join(block for block in logical_blocks if block)
-    clean = _insert_after_heading(clean, r"^##\s+2\s+Logical View[^\n]*", logical_block)
+    insert_pos = _find_logical_view_diagram_insert_pos(clean)
+    if insert_pos >= 0:
+        clean = _insert_at_position(clean, insert_pos, logical_block)
+    elif logical_block:
+        clean = _insert_after_heading(clean, r"^##\s+2\s+Logical View[^\n]*", logical_block)
+
+    if logical_block:
+        clean = _normalize_section_two_numbering(clean)
 
     infra_block = ""
     if diagrams.get("hld_infrastructure"):
@@ -1347,7 +1474,7 @@ _HLD_SYSTEM = (
     "2. If a requirements field is empty, write exactly one sentence: "
     "'Not specified in source documentation.' "
     "Do NOT add examples, typical values, assumptions, or illustrative infrastructure "
-    "(no Redis, Kafka, Qdrant, OIDC, AWS, Kubernetes unless explicitly in context).\n"
+    "(no Redis, Kafka, OIDC, AWS, Kubernetes unless explicitly in context).\n"
     "3. In sequenceDiagram blocks, participant IDs MUST be mapped codebase symbols "
     "(e.g. MealController, DiabetesElogWorkflow). Never use logical names like "
     "FoodModule or CGMConnectionService.\n"
@@ -1400,15 +1527,16 @@ def _hld_logical_prompt(plan: Dict[str, Any], requirements: Dict[str, Any], code
         f"Generate the Logical View section (Section 2) for the HLD of project '{project}'.",
         "Following SOP-036, generate a detailed logical architecture view.",
         "Include an overview paragraph of the modular design.",
-        "Then, generate a dedicated subsection for each high-level module/service identified in the requirements and codebase mappings:",
-        "### 2.x [Module Name] Logical View",
+        "Then, generate a dedicated subsection for each high-level module/service identified in the requirements and codebase mappings.",
+        "Number module subsections sequentially starting at 2.5 (diagram subsections 2.1-2.4 are reserved).",
+        "### 2.5 [Module Name] Logical View",
         "- Architectural Layer and Role.",
         "- Detailed Responsibilities (3-5 sentences).",
         "- Capabilities list.",
         "- Do NOT write an Interfaces & APIs table — it is injected automatically from code_graph.json after generation.",
         "- Dependencies on other modules.",
         "",
-        "### 2.y Interactions and Flows",
+        "### 2.N Interactions and Flows",
         "Document step-by-step transaction sequence flows. For each flow, provide steps and a ```mermaid sequenceDiagram```.",
         "CRITICAL: sequenceDiagram participant IDs MUST be exact mapped codebase symbols (e.g. MealController, FoodController, DiabetesElogWorkflow). "
         "Use participant aliases for display: participant MealController as \"Meal Controller\".",
@@ -1472,7 +1600,7 @@ def _hld_infra_prompt(plan: Dict[str, Any], requirements: Dict[str, Any], codeba
         "Use ONLY components from contract target_projects and architecture decisions in context "
         "(e.g. Welldoc.Web.Member.API, Welldoc.Web.Service_DotNetCore, Welldoc.Server.Infra.JSONRepository/Mongo, "
         "Welldoc.Integration.Libre_DotNetCore).",
-        "Do NOT mention Qdrant, Redis, Kafka, or other pipeline/vector-store tooling.",
+        "Do NOT mention Redis, Kafka, or other pipeline/vector-store tooling.",
         "If deployment platform is unknown, write 'Not specified in source documentation.' without assuming cloud vendor.",
         "",
         "### 5.1 Deployment Target",
@@ -1523,12 +1651,18 @@ def generate_hld(
     planner_max_tokens: int = 1500,
     hld_max_tokens: int = 8192,
     temperature: float = 0.2,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> HLDResult:
     """Generate the HLD Markdown document.
 
     Both artifact paths default to the `*_latest.json` pointers written
     by the upstream services.
     """
+    def progress(progress_pct: int, message: str) -> None:
+        if progress_callback:
+            progress_callback(progress_pct, message)
+
+    progress(10, "Loading requirements and code graph artifacts...")
     context = artifact_context(product=product, release=release, create=True)
     out_dir = artifact_dir or str(context.stage_dir("hld"))
     os.makedirs(out_dir, exist_ok=True)
@@ -1550,11 +1684,16 @@ def generate_hld(
     llm = get_llm_client()
 
     # ---- Pass 0: planner ------------------------------------------------
-    plan_raw = llm.chat(
-        system_prompt=_PLANNER_SYSTEM,
-        user_prompt=_planner_user_prompt(requirements, code_graph),
-        temperature=0.1,
-        max_tokens=planner_max_tokens,
+    plan_raw = _run_with_progress_pulse(
+        progress,
+        20,
+        "Planning HLD sections...",
+        lambda: llm.chat(
+            system_prompt=_PLANNER_SYSTEM,
+            user_prompt=_planner_user_prompt(requirements, code_graph),
+            temperature=0.1,
+            max_tokens=planner_max_tokens,
+        ),
     )
     try:
         plan = _coerce_json(plan_raw)
@@ -1587,6 +1726,7 @@ def generate_hld(
     plan = _normalize_plan(plan, requirements, code_graph)
 
     # ---- Pass 1: HLD markdown (Generated section-by-section) -----------
+    progress(30, "HLD plan ready. Generating document sections...")
     codebase_context = _get_codebase_context(requirements, code_graph)
     
     sections_markdown = []
@@ -1594,22 +1734,32 @@ def generate_hld(
     # 1. Introduction
     if plan.get("include_sections", {}).get("introduction", True):
         print("[HLD Pipeline] Generating Section 1: Introduction...")
-        intro_raw = llm.chat(
-            system_prompt=_HLD_SYSTEM,
-            user_prompt=_hld_intro_prompt(plan, requirements, codebase_context),
-            temperature=temperature,
-            max_tokens=hld_max_tokens,
+        intro_raw = _run_with_progress_pulse(
+            progress,
+            35,
+            "Generating Section 1: Introduction...",
+            lambda: llm.chat(
+                system_prompt=_HLD_SYSTEM,
+                user_prompt=_hld_intro_prompt(plan, requirements, codebase_context),
+                temperature=temperature,
+                max_tokens=hld_max_tokens,
+            ),
         )
         sections_markdown.append(intro_raw)
         
     # 2. Logical View
     if plan.get("include_sections", {}).get("logical_view", True):
         print("[HLD Pipeline] Generating Section 2: Logical View...")
-        logical_raw = llm.chat(
-            system_prompt=_HLD_SYSTEM,
-            user_prompt=_hld_logical_prompt(plan, requirements, codebase_context, code_graph),
-            temperature=temperature,
-            max_tokens=hld_max_tokens,
+        logical_raw = _run_with_progress_pulse(
+            progress,
+            45,
+            "Generating Section 2: Logical View...",
+            lambda: llm.chat(
+                system_prompt=_HLD_SYSTEM,
+                user_prompt=_hld_logical_prompt(plan, requirements, codebase_context, code_graph),
+                temperature=temperature,
+                max_tokens=hld_max_tokens,
+            ),
         )
         # Prepend deterministic contract subsections
         arch_decisions = _render_architecture_decisions(code_graph)
@@ -1636,43 +1786,62 @@ def generate_hld(
     # 3. Security Approach (NFR — requirements.json only)
     if plan.get("include_sections", {}).get("security"):
         print("[HLD Pipeline] Generating Section 3: Security Approach...")
-        security_raw = llm.chat(
-            system_prompt=_HLD_SYSTEM,
-            user_prompt=_hld_security_prompt(plan, requirements, codebase_context),
-            temperature=temperature,
-            max_tokens=hld_max_tokens,
+        security_raw = _run_with_progress_pulse(
+            progress,
+            55,
+            "Generating Section 3: Security Approach...",
+            lambda: llm.chat(
+                system_prompt=_HLD_SYSTEM,
+                user_prompt=_hld_security_prompt(plan, requirements, codebase_context),
+                temperature=temperature,
+                max_tokens=hld_max_tokens,
+            ),
         )
         sections_markdown.append(security_raw)
     else:
+        progress(52, "Skipping Section 3: no security content in requirements.")
         print("[HLD Pipeline] Skipping Section 3: no security content in requirements.json")
 
     # 4. Scalability View (NFR — requirements.json only)
     if plan.get("include_sections", {}).get("scalability"):
         print("[HLD Pipeline] Generating Section 4: Scalability View...")
-        scalability_raw = llm.chat(
-            system_prompt=_HLD_SYSTEM,
-            user_prompt=_hld_scalability_prompt(plan, requirements, codebase_context),
-            temperature=temperature,
-            max_tokens=hld_max_tokens,
+        scalability_raw = _run_with_progress_pulse(
+            progress,
+            60,
+            "Generating Section 4: Scalability View...",
+            lambda: llm.chat(
+                system_prompt=_HLD_SYSTEM,
+                user_prompt=_hld_scalability_prompt(plan, requirements, codebase_context),
+                temperature=temperature,
+                max_tokens=hld_max_tokens,
+            ),
         )
         sections_markdown.append(scalability_raw)
     else:
+        progress(57, "Skipping Section 4: no scalability content in requirements.")
         print("[HLD Pipeline] Skipping Section 4: no scalability content in requirements.json")
 
     # 5. Infrastructure View (NFR — requirements.json only)
     if plan.get("include_sections", {}).get("infrastructure"):
         print("[HLD Pipeline] Generating Section 5: Infrastructure View...")
-        infra_raw = llm.chat(
-            system_prompt=_HLD_SYSTEM,
-            user_prompt=_hld_infra_prompt(plan, requirements, codebase_context),
-            temperature=temperature,
-            max_tokens=hld_max_tokens,
+        infra_raw = _run_with_progress_pulse(
+            progress,
+            65,
+            "Generating Section 5: Infrastructure View...",
+            lambda: llm.chat(
+                system_prompt=_HLD_SYSTEM,
+                user_prompt=_hld_infra_prompt(plan, requirements, codebase_context),
+                temperature=temperature,
+                max_tokens=hld_max_tokens,
+            ),
         )
         sections_markdown.append(infra_raw)
     else:
+        progress(62, "Skipping Section 5: no infrastructure content in requirements.")
         print("[HLD Pipeline] Skipping Section 5: no infrastructure content in requirements.json")
         
     # Assemble cover and Revision History & TOC
+    progress(70, "Assembling HLD document...")
     project = _document_topic(requirements, plan)
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
     
@@ -1711,6 +1880,7 @@ def generate_hld(
     hld_raw = "\n".join(cover) + "\n\n" + "\n\n".join(sections_markdown)
 
     # ---- Pass 2: sanitize + validate diagrams --------------------------
+    progress(75, "Processing Mermaid diagrams...")
     hld_clean = postprocess_mermaid(hld_raw)
     hld_clean, hld_diagram_meta = _insert_deterministic_hld_diagrams(
         hld_clean,
@@ -1720,11 +1890,13 @@ def generate_hld(
     )
     hld_clean = postprocess_mermaid(hld_clean)
 
+    progress(82, "Validating diagrams and HLD accuracy...")
     diagram_report = validate_diagrams(hld_clean)
     diagram_report.update(hld_diagram_meta)
     accuracy_report = validate_hld(hld_clean, code_graph, requirements=requirements)
 
     # ---- Pass 3: persist -----------------------------------------------
+    progress(90, "Exporting HLD DOCX...")
     completed_at = datetime.utcnow().isoformat()
     docx_path = str(hld_run_dir / f"HLD_{context.timestamp}.docx")
     markdown_to_docx(hld_clean, docx_path)
@@ -1748,10 +1920,12 @@ def generate_hld(
         "accuracy_report": accuracy_report,
         "nfr_sections": plan.get("nfr_sections", {}),
     }
+    progress(95, "Saving HLD manifest...")
     manifest_path = str(hld_run_dir / f"HLD_{context.timestamp}.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, ensure_ascii=False)
 
+    progress(99, "HLD generation complete.")
     return HLDResult(
         job_id=job_id,
         started_at=started_at,

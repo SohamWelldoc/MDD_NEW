@@ -1,8 +1,7 @@
 """Vector store and embedding model initialization.
 
-The pipeline now uses a lightweight JSONL-backed vector store instead of
-Qdrant. RAG behavior is unchanged: chunks are embedded, persisted, and searched
-by cosine similarity, with Confluence vectors under
+Uses a lightweight JSONL-backed vector store: chunks are embedded, persisted,
+and searched by cosine similarity, with Confluence vectors under
 artifacts/<project>/<release>/confluence/.
 """
 
@@ -80,11 +79,6 @@ def close_vector_store():
         print("JSON vector store handles closed")
 
 
-def close_qdrant_client():
-    """Backward-compatible alias for the old shutdown hook."""
-    return close_vector_store()
-
-
 def reset_connections():
     """Reset all connections (useful for recovery from errors)"""
     global _connection_stats
@@ -126,11 +120,6 @@ def get_vector_store(
         return _vector_store
 
 
-def get_qdrant_client():
-    """Backward-compatible alias; returns the JSON vector store."""
-    return get_vector_store()
-
-
 def get_embedding_model():
     """Get or create embedding model"""
     global _embedding_model
@@ -170,17 +159,12 @@ def ensure_collection_exists():
     return get_vector_store(), get_collection_name()
 
 
-def get_qdrant_collection():
-    """Backward-compatible alias; returns JSON vector store and collection name."""
-    return ensure_collection_exists()
-
-
 def get_retriever():
     """Get or create retriever instance"""
     global _retriever
     
     if _retriever is None:
-        store, collection_name = get_qdrant_collection()
+        store, collection_name = ensure_collection_exists()
 
         # Read cache configuration (disabled by default for backward compatibility)
         enable_cache = os.getenv("ENABLE_QUERY_CACHE", "false").lower() in ("true", "1", "yes")
@@ -207,8 +191,8 @@ def get_chroma_client():
 
 
 def get_chroma_collection():
-    """Alias for get_qdrant_collection (backward compatibility)."""
-    return get_qdrant_collection()
+    """Alias for ensure_collection_exists (backward compatibility)."""
+    return ensure_collection_exists()
 
 
 def close_chroma_client():

@@ -15,7 +15,7 @@ _BACKTICK_SYMBOL_RE = re.compile(r"`([^`]+)`")
 _MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
 
 _PIPELINE_TERMS = frozenset({
-    "qdrant", "redis", "kafka", "rabbitmq", "memcached",
+    "redis", "kafka", "rabbitmq", "memcached",
 })
 
 _FILLER_PHRASES = (

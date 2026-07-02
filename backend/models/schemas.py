@@ -1,7 +1,7 @@
 """Pydantic models for API request/response"""
 
 from pydantic import BaseModel, Field, field_validator
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional, Dict, Literal
 from datetime import datetime
 import re
 
@@ -404,6 +404,11 @@ class MDDModuleInfo(BaseModel):
     in_hld: bool = False
     in_code_graph: bool = False
     dependency_only: bool = False
+    affected_by_hld_change: bool = False
+    hld_impact_confidence: Optional[str] = None
+    hld_impact_reasons: List[str] = Field(default_factory=list)
+    hld_impact_version: Optional[str] = None
+    affected_review_ids: List[str] = Field(default_factory=list)
 
 
 class MDDModuleCatalogResponse(BaseModel):
@@ -443,3 +448,152 @@ class MDDGenerateResponse(BaseModel):
     completed_at: str
     generated: List[MDDGeneratedModule] = Field(default_factory=list)
     manifest_path: str
+
+
+# ============================================================
+# Review Loop Models
+# ============================================================
+
+DocumentType = Literal["hld", "mdd"]
+ReviewChangeType = Literal["correction", "addition", "diagram", "formatting", "missing_evidence", "full_rewrite"]
+ReviewPriority = Literal["low", "medium", "high"]
+ReviewTargetKind = Literal["section", "table", "diagram", "full_document"]
+ReviewStatus = Literal[
+    "generated",
+    "in_review",
+    "changes_requested",
+    "revision_proposed",
+    "approved",
+    "rejected",
+    "stale_due_to_hld_change",
+]
+FeedbackStatus = Literal["open", "drafted", "applied", "rejected", "conflict"]
+
+
+class ReviewCreateRequest(BaseModel):
+    """Create a review session from the latest generated HLD or MDD artifact."""
+
+    document_type: DocumentType
+    product: Optional[str] = Field(None, max_length=100)
+    release: Optional[str] = Field(None, max_length=100)
+    module_slug: Optional[str] = Field(None, max_length=150)
+    created_by: Optional[str] = Field(default="default_user", max_length=100)
+
+
+class ReviewFeedbackRequest(BaseModel):
+    """Reviewer feedback against a specific document version."""
+
+    feedback: str = Field(..., min_length=1, max_length=20000)
+    target_section: Optional[str] = Field(None, max_length=300)
+    change_type: Optional[ReviewChangeType] = None
+    priority: Optional[ReviewPriority] = Field(default="medium")
+    target_kind: Optional[ReviewTargetKind] = Field(default="section")
+    reviewer_expectation: Optional[str] = Field(None, max_length=2000)
+    base_version: Optional[str] = Field(None, max_length=50)
+    reviewer: Optional[str] = Field(default="default_user", max_length=100)
+
+
+class ReviewReviseRequest(BaseModel):
+    feedback_id: str = Field(..., min_length=1, max_length=100)
+    requested_by: Optional[str] = Field(default="default_user", max_length=100)
+
+
+class ReviewDecisionRequest(BaseModel):
+    draft_version: str = Field(..., min_length=1, max_length=50)
+    feedback_id: Optional[str] = Field(None, max_length=100)
+    decided_by: Optional[str] = Field(default="default_user", max_length=100)
+    reason: Optional[str] = Field(None, max_length=2000)
+    role: Optional[str] = Field(default="reviewer", max_length=50)
+    source_ip: Optional[str] = Field(None, max_length=100)
+
+
+class ReviewResponse(BaseModel):
+    review: Dict[str, Any]
+
+
+class ReviewListResponse(BaseModel):
+    reviews: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ReviewFeedbackResponse(BaseModel):
+    review_id: str
+    feedback: Dict[str, Any]
+    review: Dict[str, Any]
+
+
+class ReviewRevisionResponse(BaseModel):
+    review_id: str
+    feedback_id: str
+    draft_version: str
+    classification: Dict[str, Any]
+    validation_report: Dict[str, Any]
+    diff: Dict[str, Any]
+    review: Dict[str, Any]
+
+
+class ReviewChangePlanRequest(BaseModel):
+    feedback_id: str = Field(..., min_length=1, max_length=100)
+    requested_by: Optional[str] = Field(default="default_user", max_length=100)
+
+
+class ReviewChangePlanResponse(BaseModel):
+    review_id: str
+    feedback_id: str
+    change_plan: Dict[str, Any]
+
+
+class ReviewRevisionJobResponse(BaseModel):
+    review_id: str
+    job_id: str
+    status: str
+    message: str
+
+
+class ReviewRevisionStatusResponse(BaseModel):
+    review_id: str
+    job_id: str
+    status: str
+    progress: int
+    message: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    started_at: str
+    completed_at: Optional[str] = None
+
+
+class ReviewDiffResponse(BaseModel):
+    review_id: str
+    base_version: str
+    draft_version: str
+    diff: Dict[str, Any]
+
+
+class ReviewDecisionResponse(BaseModel):
+    review_id: str
+    version: Optional[str] = None
+    draft_version: str
+    review: Dict[str, Any]
+
+
+class ReviewVersionsResponse(BaseModel):
+    review_id: str
+    current_version: str
+    versions: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ReviewRestoreRequest(BaseModel):
+    version: str = Field(..., min_length=1, max_length=50)
+    restored_by: Optional[str] = Field(default="default_user", max_length=100)
+    reason: Optional[str] = Field(None, max_length=2000)
+
+
+class ReviewFinalizeRequest(BaseModel):
+    version: Optional[str] = Field(None, max_length=50)
+    finalized_by: Optional[str] = Field(default="default_user", max_length=100)
+    role: Optional[str] = Field(default="architect", max_length=50)
+    comment: Optional[str] = Field(None, max_length=2000)
+
+
+class ReviewJobActionRequest(BaseModel):
+    requested_by: Optional[str] = Field(default="default_user", max_length=100)
+    reason: Optional[str] = Field(None, max_length=2000)

@@ -37,7 +37,41 @@ def _short(value: Any, limit: int = 72) -> str:
     text = re.sub(r"\s+", " ", str(value or "").replace('"', "'")).strip()
     if len(text) <= limit:
         return text
-    return text[: limit - 1].rstrip() + "..."
+    clipped = text[:limit].rstrip()
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0]
+    return clipped or text[:limit].rstrip()
+
+
+def _wrap(value: Any, width: int = 36) -> str:
+    words = re.sub(r"\s+", " ", str(value or "").replace('"', "'")).strip().split()
+    if not words:
+        return ""
+    lines: List[str] = []
+    current = words[0]
+    for word in words[1:]:
+        if len(current) + len(word) + 1 > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}"
+    lines.append(current)
+    return "<br/>".join(lines)
+
+
+def _decision_label(decision: Dict[str, Any]) -> str:
+    kind = str(decision.get("kind") or "decision")
+    text = str(decision.get("text") or "").strip()
+    titles = {
+        "persistence": "Persistence Decision",
+        "processing": "Timer / Processing Decision",
+        "new_capability": "New Capability Decision",
+        "unresolved": "Open Question",
+        "decision": "Architecture Decision",
+    }
+    title = titles.get(kind, f"{kind.replace('_', ' ').title()} Decision")
+    body = re.sub(r"^[A-Za-z][A-Za-z\s/-]{0,40}:\s*", "", text).strip() or text
+    return f"{title}<br/>{_wrap(body, 34)}" if body else title
 
 
 def _project_label(project: str) -> str:
@@ -186,8 +220,7 @@ def build_decision_diagram(facts: Dict[str, Any]) -> str:
     lines = ["flowchart LR", f"    {root}[{_quote('Architecture decisions and evidence')}]"]
     for decision in decisions[:10]:
         node_id = _safe_id(decision.get("id") or decision.get("kind") or "Decision", used)
-        label = f"{decision.get('kind', 'decision')}: {_short(decision.get('text', ''), 82)}"
-        lines.append(f"    {root} --> {node_id}[{_quote(label)}]")
+        lines.append(f"    {root} --> {node_id}[{_quote(_decision_label(decision))}]")
     return "\n".join(lines)
 
 
@@ -208,7 +241,7 @@ def build_infrastructure_diagram(facts: Dict[str, Any]) -> str:
         lines.append(f"    {api_id} --> {node_id}[{_quote(_short(_project_label(project), 54))}]")
     for decision in decisions[:4]:
         node_id = _safe_id(decision.get("id") or decision.get("kind") or "Decision", used)
-        lines.append(f"    {api_id} -.->|{_quote(decision.get('kind', 'decision'))}| {node_id}[{_quote(_short(decision.get('text', ''), 70))}]")
+        lines.append(f"    {api_id} -.->|{_quote(decision.get('kind', 'decision'))}| {node_id}[{_quote(_decision_label(decision))}]")
     return "\n".join(lines)
 
 

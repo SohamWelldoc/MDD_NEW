@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routes import ingestion, requirements, codebase, hld, mdd, demo
+from routes import ingestion, requirements, codebase, hld, mdd, demo, reviews
 
 app = FastAPI(
     title="HLD Generation Pipeline API",
@@ -45,9 +45,9 @@ async def shutdown_event():
     print("[Stopping] Shutting down HLD Generation Pipeline API...")
     
     # Close vector-store handles
-    from services.artifact_store.db import close_qdrant_client
+    from services.artifact_store.db import close_vector_store
     try:
-        close_qdrant_client()
+        close_vector_store()
     except Exception as e:
         print(f"Warning: Error during shutdown cleanup: {e}")
     
@@ -68,6 +68,7 @@ app.include_router(codebase.router, prefix="/api/codebase", tags=["codebase"])
 app.include_router(hld.router, prefix="/api/hld", tags=["hld"])
 app.include_router(mdd.router, prefix="/api/mdd", tags=["mdd"])
 app.include_router(demo.router, prefix="/api/demo", tags=["demo"])
+app.include_router(reviews.router, prefix="/api/reviews", tags=["reviews"])
 
 # Serve frontend (optional - kept for future UI)
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
@@ -93,6 +94,7 @@ else:
                 "GET  /api/mdd/modules       (module catalog for multi-select)",
                 "POST /api/mdd/generate     (generate one MDD per selected module)",
                 "GET  /api/mdd/manifest      (last MDD generation metadata)",
+                "POST /api/reviews/create    (start HLD/MDD human review session)",
             ],
         }
 

@@ -21,6 +21,7 @@ from models.schemas import (
 from services.mdd.mdd_generator import generate_mdd_for_modules
 from services.mdd.mdd_module_catalog import build_module_catalog, load_module_catalog
 from services.artifact_store.artifact_paths import artifact_context
+from services.review.cascade import latest_hld_module_impacts
 
 router = APIRouter()
 mdd_jobs: Dict[str, Dict[str, Any]] = {}
@@ -56,6 +57,18 @@ def _latest_matching(stage_dir: Path, pattern: str) -> Optional[str]:
 
 
 def _to_catalog_response(catalog: Dict[str, Any]) -> MDDModuleCatalogResponse:
+    impacts = latest_hld_module_impacts(catalog.get("product"), catalog.get("release"))
+    modules = []
+    for module in catalog.get("modules", []) or []:
+        impact = impacts.get(module.get("slug")) or impacts.get(module.get("id"))
+        modules.append({
+            **module,
+            "affected_by_hld_change": bool(impact),
+            "hld_impact_confidence": (impact or {}).get("confidence"),
+            "hld_impact_reasons": (impact or {}).get("reasons", []),
+            "hld_impact_version": (impact or {}).get("hld_version"),
+            "affected_review_ids": (impact or {}).get("review_ids", []),
+        })
     return MDDModuleCatalogResponse(
         job_id=catalog.get("job_id", ""),
         ticket=catalog.get("ticket"),
@@ -63,7 +76,7 @@ def _to_catalog_response(catalog: Dict[str, Any]) -> MDDModuleCatalogResponse:
         catalog_warnings=catalog.get("catalog_warnings", []),
         hld_path=catalog.get("hld_path"),
         module_count=catalog.get("module_count", len(catalog.get("modules", []))),
-        modules=catalog.get("modules", []),
+        modules=modules,
     )
 
 
@@ -91,12 +104,12 @@ def _mdd_result_payload(result) -> Dict[str, Any]:
 
 def _run_mdd_job(job_id: str, request: MDDGenerateRequest) -> None:
     job = mdd_jobs[job_id]
+
+    def update_progress(progress: int, message: str) -> None:
+        job.update(status="processing", progress=progress, message=message)
+
     try:
-        job.update(
-            status="processing",
-            progress=10,
-            message=f"Generating MDD for {len(request.selected_modules)} selected module(s)...",
-        )
+        update_progress(5, f"MDD generation started for {len(request.selected_modules)} module(s)...")
         artifact_dir = _artifact_dir(request.product, request.release)
         result = generate_mdd_for_modules(
             selected_modules=request.selected_modules,
@@ -104,6 +117,7 @@ def _run_mdd_job(job_id: str, request: MDDGenerateRequest) -> None:
             product=request.product,
             release=request.release,
             artifact_dir=artifact_dir,
+            progress_callback=update_progress,
         )
         job.update(
             status="completed",

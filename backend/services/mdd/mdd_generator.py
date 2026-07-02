@@ -17,7 +17,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+ProgressCallback = Callable[[int, str], None]
 
 from services.shared.llm_client import get_llm_client
 from services.mdd.mdd_module_catalog import (
@@ -1973,8 +1975,14 @@ def generate_mdd_for_modules(
     hld_path: Optional[str] = None,
     code_graph_path: Optional[str] = None,
     temperature: float = 0.2,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> MDDGenerateResult:
     """Generate one MDD markdown file per selected logical module."""
+    def progress(progress_pct: int, message: str) -> None:
+        if progress_callback:
+            progress_callback(progress_pct, message)
+
+    progress(10, "Loading module catalog and artifacts...")
     job_id = uuid.uuid4().hex[:8]
     started_at = datetime.utcnow().isoformat()
     context = artifact_context(product=product, release=release, create=True)
@@ -2010,8 +2018,15 @@ def generate_mdd_for_modules(
     resolved_ticket = ticket or catalog.get("ticket") or code_graph.get("contract", {}).get("ticket") or "feature"
     llm = get_llm_client()
     generated: List[MDDModuleResult] = []
+    module_count = len(selected_modules)
 
-    for logical_name in selected_modules:
+    for index, logical_name in enumerate(selected_modules):
+        module_base = 15 + int(index * 70 / module_count)
+        module_end = 15 + int((index + 1) * 70 / module_count)
+        module_span = max(module_end - module_base, 1)
+        module_label = f"module {index + 1}/{module_count}: {logical_name}"
+
+        progress(module_base, f"Generating MDD for {module_label} (planning sections)...")
         print(f"[MDD Pipeline] Generating MDD for module: {logical_name}...")
         bundle = build_module_bundle(
             logical_name,
@@ -2033,7 +2048,15 @@ def generate_mdd_for_modules(
             plan = {"include_sections": {}, "module_name": logical_name}
         plan = normalize_mdd_plan(plan, bundle)
 
+        progress(
+            module_base + int(module_span * 0.35),
+            f"Generating MDD for {module_label} (writing document sections)...",
+        )
         mdd_raw = _build_mdd_document(bundle, plan, llm, temperature=temperature)
+        progress(
+            module_base + int(module_span * 0.65),
+            f"Processing diagrams and validating {logical_name}...",
+        )
         mdd_clean = postprocess_mermaid(mdd_raw)
         diagram_report = validate_diagrams(mdd_clean)
         quality_report = build_mdd_quality_report(
@@ -2053,6 +2076,10 @@ def generate_mdd_for_modules(
 
         slug = slugify_module_name(logical_name)
         timestamped_plan_path = os.path.join(mdd_dir, f"mdd_plan_{slug}_{context.timestamp}.json")
+        progress(
+            module_base + int(module_span * 0.82),
+            f"Exporting DOCX for {logical_name}...",
+        )
         with open(timestamped_plan_path, "w", encoding="utf-8") as fh:
             json.dump(
                 {
@@ -2089,6 +2116,7 @@ def generate_mdd_for_modules(
         ))
         print(f"[MDD Pipeline] Wrote {docx_path}")
 
+    progress(90, "Saving MDD manifest...")
     completed_at = datetime.utcnow().isoformat()
     timestamped_manifest_path = os.path.join(out_dir, f"mdd_manifest_{context.timestamp}.json")
     manifest = {
@@ -2122,6 +2150,7 @@ def generate_mdd_for_modules(
     with open(timestamped_manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, ensure_ascii=False)
 
+    progress(99, "MDD generation complete.")
     return MDDGenerateResult(
         job_id=job_id,
         ticket=resolved_ticket,

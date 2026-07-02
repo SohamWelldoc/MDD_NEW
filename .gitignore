@@ -95,9 +95,6 @@ logs/
 .env.*.local
 *.local.env
 
-# Qdrant storage (local data)
-qdrant_storage/
-
 # Session storage (local data)
 backend/session_storage/
 
@@ -121,8 +118,3 @@ temp/
 
 # MDD_NEW HLD pipeline outputs
 artifacts/
-
-
-# Embedded Qdrant local store
-qdrant_data/
-
